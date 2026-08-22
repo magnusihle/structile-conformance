@@ -1,0 +1,17 @@
+{
+  "name": "@structile/conformance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Protected conformance runner for Structile",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "npm@11.17.0",
+  "bin": {"platform-conformance":"src/cli.mjs","structile-conformance":"src/cli.mjs"},
+  "files": ["src","requirements","verification","tooling","LICENSE","NOTICE"],
+  "engines": {"node":">=24.19.0 <25","npm":">=11 <13"},
+  "scripts": {
+    "planning:check": "node --test tooling/test/*.test.mjs && node tooling/validate-planning.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "npm run planning:check && npm test"
+  }
+}
