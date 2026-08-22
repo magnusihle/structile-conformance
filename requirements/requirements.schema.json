@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/platform/requirements.schema.json",
+  "title": "Frontend platform requirement catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "catalogVersion", "requirements"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "catalogVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/requirement" }
+    }
+  },
+  "$defs": {
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "statement", "category", "introducedIn", "gate", "priority", "waiverPolicy", "verification"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Z][A-Z0-9]*-[0-9]{3}$" },
+        "title": { "type": "string", "minLength": 5 },
+        "statement": { "type": "string", "pattern": "\\bMUST(?: NOT)?\\b" },
+        "category": { "type": "string", "minLength": 2 },
+        "introducedIn": { "enum": ["v0.1", "v0.2", "v0.3", "v0.4", "v0.5", "v0.6", "v0.7", "v0.8", "v0.9", "v1.0"] },
+        "gate": { "enum": ["G0", "G1", "G2", "G3", "G4", "G4A", "G5", "G6"] },
+        "priority": { "enum": ["P0", "P1", "P2"] },
+        "waiverPolicy": { "enum": ["never", "human-expiring"] },
+        "verification": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9]*-[0-9]{3}$" }
+        },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}

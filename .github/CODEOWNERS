@@ -1,0 +1,9 @@
+* @magnusihle
+
+/.github/ @magnusihle
+/requirements/ @magnusihle
+/verification/ @magnusihle
+/tooling/ @magnusihle
+/src/ @magnusihle
+/language-policy.json @magnusihle
+/scripts/validate-language-policy.ts @magnusihle

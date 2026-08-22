@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0.0",
+  "files": {
+    "requirements/requirements.json": "b48ac68595e39f5e8b4607b4374aba2e5092697d49a07d37788209f3338fdb89",
+    "requirements/requirements.schema.json": "8b16f15fd14f8b27f58f242acb71bb7c313f28d22014b5be00b72cbc469f9276",
+    "requirements/waivers.json": "6491e451106c705512aa62ec0f2831a416c32ebf46394a6ef1370eecde75ff42",
+    "verification/test-catalog.json": "76c9bbdbcc36b6443e5d105ec301fd7f24af75e34c5a52a7a4bb6256ab43d556",
+    "verification/evidence.schema.json": "ae2e9f5912e03bb6690f227c219c14db12ab1722fbaae989577ca981a56e06c4",
+    "tooling/validate-planning.mjs": "0d7c8a6f7de91e4ba06c39a9606f682ad66c078268a64febad6e0169c797f4be",
+    "tooling/test/validate-planning.test.mjs": "d04e7950ecea6cfa2779d0887e635e43a91eb55dd1003f56b95f5b8f0c7be24f",
+    "examples/evidence.example.json": "ac34484ff7b51103da08ddec60367ea61fc09eb152c325afee77d4b176f1a2c9"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "1.0.0",
+  "policy": "typescript-only-authored-source",
+  "forbiddenExtensions": [".js", ".jsx", ".mjs", ".cjs"],
+  "ignoredDirectories": [".git", "node_modules", "dist", "coverage", "evidence", "artifacts"],
+  "protectedExceptions": [
+    "tooling/test/validate-planning.test.mjs",
+    "tooling/validate-planning.mjs"
+  ]
+}
