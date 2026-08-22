@@ -12,17 +12,29 @@ export const suiteIds = Object.freeze({
   "open-source": "OSS-001"
 });
 
-export async function loadCatalog() {
+export type SuiteSlug = keyof typeof suiteIds;
+
+export interface ProtectedTest {
+  id: string;
+  gate: string;
+  requirements: string[];
+}
+
+interface TestCatalog {
+  tests: ProtectedTest[];
+}
+
+export async function loadCatalog(): Promise<TestCatalog> {
   return JSON.parse(await readFile(resolve(root, "verification/test-catalog.json"), "utf8"));
 }
 
-export async function resolveSuite(slug) {
-  const id = suiteIds[slug];
+export async function resolveSuite(slug: string): Promise<ProtectedTest | undefined> {
+  const id = suiteIds[slug as SuiteSlug];
   if (!id) return undefined;
   const catalog = await loadCatalog();
-  return catalog.tests.find((test) => test.id === id);
+  return catalog.tests.find((test: ProtectedTest) => test.id === id);
 }
 
-export function runnerRoot() {
+export function runnerRoot(): string {
   return root;
 }

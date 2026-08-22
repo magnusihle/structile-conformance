@@ -6,12 +6,18 @@
   "license": "Apache-2.0",
   "type": "module",
   "packageManager": "npm@11.17.0",
-  "bin": {"platform-conformance":"src/cli.mjs","structile-conformance":"src/cli.mjs"},
+  "bin": {"platform-conformance":"src/cli.ts","structile-conformance":"src/cli.ts"},
   "files": ["src","requirements","verification","tooling","LICENSE","NOTICE"],
   "engines": {"node":">=24.19.0 <25","npm":">=11 <13"},
   "scripts": {
+    "language:check": "node scripts/validate-language-policy.ts",
     "planning:check": "node --test tooling/test/*.test.mjs && node tooling/validate-planning.mjs",
-    "test": "node --test test/*.test.mjs",
-    "check": "npm run planning:check && npm test"
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "npm run planning:check && npm run language:check && npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.13",
+    "typescript": "7.0.2"
   }
 }

@@ -2,18 +2,18 @@
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { resolveSuite, suiteIds } from "./catalog.mjs";
-import { configDigest, suites } from "./suites.mjs";
-import { buildEvidence, candidateIdentity, writeEvidence } from "./evidence.mjs";
+import { resolveSuite, suiteIds, type SuiteSlug } from "./catalog.ts";
+import { configDigest, suites, type SuiteOptions, type SuiteResult } from "./suites.ts";
+import { buildEvidence, candidateIdentity, writeEvidence } from "./evidence.ts";
 import { loadDefaultCatalogs, validateEvidence } from "../tooling/validate-planning.mjs";
-import { readJson } from "./io.mjs";
+import { readJson } from "./io.ts";
 
-function usage() {
+function usage(): void {
   process.stderr.write("Usage: platform-conformance list | run <suite> [--candidate PATH] [--evidence-dir PATH] | verify-evidence <path> [--candidate-sha SHA] [--runner-digest DIGEST]\n");
 }
 
-function parseOptions(args) {
-  const options = {};
+function parseOptions(args: string[]): SuiteOptions {
+  const options: SuiteOptions = {};
   for (let index = 0; index < args.length; index += 1) {
     const current = args[index];
     if (!current?.startsWith("--")) throw new Error(`unexpected argument ${current}`);
@@ -25,9 +25,9 @@ function parseOptions(args) {
   return options;
 }
 
-async function runSuite(slug, rawOptions) {
+async function runSuite(slug: string, rawOptions: SuiteOptions): Promise<number> {
   const test = await resolveSuite(slug);
-  const suite = suites[slug];
+  const suite = suites[slug as SuiteSlug];
   if (!test || !suite) throw new Error(`unknown or unimplemented suite ${slug}`);
   const candidate = resolve(String(rawOptions.candidate ?? process.cwd()));
   const identity = await candidateIdentity(candidate);
@@ -39,7 +39,7 @@ async function runSuite(slug, rawOptions) {
   const startedAt = new Date().toISOString();
   let status = "passed";
   let exitCode = 0;
-  let result = { measurements: {}, artifactNames: [] };
+  let result: SuiteResult = { measurements: {}, artifactNames: [] };
   try {
     result = await suite({ candidate, artifactDir, options: rawOptions });
   } catch (error) {
@@ -50,7 +50,8 @@ async function runSuite(slug, rawOptions) {
       status = "error";
       exitCode = 2;
     }
-    result = { measurements: { error: String(error?.message ?? error) }, artifactNames: [] };
+    const failure = error as { message?: string };
+    result = { measurements: { error: String(failure.message ?? error) }, artifactNames: [] };
   }
   const finishedAt = new Date().toISOString();
   const evidence = await buildEvidence({
@@ -64,7 +65,7 @@ async function runSuite(slug, rawOptions) {
   return exitCode;
 }
 
-async function verifyEvidence(path, rawOptions) {
+async function verifyEvidence(path: string, rawOptions: SuiteOptions): Promise<void> {
   const catalogs = await loadDefaultCatalogs();
   const evidence = await readJson(resolve(path));
   const result = validateEvidence(evidence, catalogs.requirements, catalogs.tests, {
@@ -74,7 +75,7 @@ async function verifyEvidence(path, rawOptions) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-async function main() {
+async function main(): Promise<void> {
   const [command, subject, ...rest] = process.argv.slice(2);
   if (command === "list") {
     process.stdout.write(`${JSON.stringify(Object.entries(suiteIds).map(([suite, testId]) => ({ suite, testId })))}\n`);
@@ -93,6 +94,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${JSON.stringify({ error: String(error?.message ?? error) })}\n`);
+  const failure = error as { message?: string };
+  process.stderr.write(`${JSON.stringify({ error: String(failure.message ?? error) })}\n`);
   process.exitCode = 2;
 });

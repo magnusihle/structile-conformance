@@ -4,7 +4,24 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { basename, resolve } from "node:path";
-import { command, listFiles, readJson, sha256, writeJson } from "./io.mjs";
+import { command, listFiles, readJson, sha256, writeJson } from "./io.ts";
+import type { SuiteSlug } from "./catalog.ts";
+
+type AnyRecord = Record<string, any>;
+export type SuiteOptions = Record<string, string | true | undefined>;
+
+export interface SuiteContext {
+  candidate: string;
+  artifactDir: string;
+  options: SuiteOptions;
+}
+
+export interface SuiteResult {
+  measurements: Record<string, unknown>;
+  artifactNames: string[];
+}
+
+export type Suite = (context: SuiteContext) => Promise<SuiteResult>;
 
 const packageNames = [
   "@structile/tokens", "@structile/primitives", "@structile/components", "@structile/catalog",
@@ -12,22 +29,22 @@ const packageNames = [
   "@structile/capability-sdk", "@structile/auth", "@structile/control-plane", "@structile/agent-harness"
 ];
 
-function assertExactKeys(value, keys, label) {
+function assertExactKeys(value: unknown, keys: readonly string[], label: string): asserts value is AnyRecord {
   assert.ok(value && typeof value === "object" && !Array.isArray(value), `${label} must be an object`);
   assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} keys do not match the protected contract`);
 }
 
-async function architectureBoundaries({ candidate, artifactDir, options }) {
+async function architectureBoundaries({ candidate, artifactDir, options }: SuiteContext): Promise<SuiteResult> {
   const boundaries = await readJson(resolve(candidate, "architecture/package-boundaries.json"));
-  assert.deepEqual(boundaries.packages.map((item) => item.name), packageNames);
-  assert.deepEqual(boundaries.externalPackages.map((item) => item.name), ["@structile/conformance"]);
+  assert.deepEqual(boundaries.packages.map((item: AnyRecord) => item.name), packageNames);
+  assert.deepEqual(boundaries.externalPackages.map((item: AnyRecord) => item.name), ["@structile/conformance"]);
   assert.equal(boundaries.externalPackages[0].repository, "https://github.com/magnusihle/structile-conformance");
   const rootManifest = await readJson(resolve(candidate, "package.json"));
   const tsconfig = await readJson(resolve(candidate, "tsconfig.base.json"));
   assert.equal(rootManifest.devDependencies.react, "19.2.8");
   assert.equal(rootManifest.devDependencies.typescript, "7.0.2");
   assert.ok(tsconfig.compilerOptions.strict);
-  const nodes = [];
+  const nodes: Array<{ name: string; path: string; dependencies: string[] }> = [];
   for (const boundary of boundaries.packages) {
     const manifest = await readJson(resolve(candidate, boundary.path, "package.json"));
     assert.equal(manifest.name, boundary.name);
@@ -39,8 +56,8 @@ async function architectureBoundaries({ candidate, artifactDir, options }) {
     assert.equal(nodes.find((node) => node.name === reactPackage)?.dependencies.includes("react"), true, `${reactPackage} must declare its React boundary`);
   }
   const sourcePaths = (await listFiles(candidate)).filter((path) => /^(packages|apps)\/.+\.(?:ts|tsx|js|mjs)$/.test(path));
-  const forbiddenHits = [];
-  const uiDatabaseHits = [];
+  const forbiddenHits: Array<{ path: string; pattern: string }> = [];
+  const uiDatabaseHits: string[] = [];
   for (const path of sourcePaths) {
     const source = await readFile(resolve(candidate, path), "utf8");
     for (const pattern of [/toll-refundering/i, /customs declaration/i, /tenant javascript/i, /global cross-product (?:control )?database/i]) {
@@ -67,9 +84,9 @@ async function architectureBoundaries({ candidate, artifactDir, options }) {
   assert.equal(referenceStatus.stdout.trim(), "", "Northstar reference must be a clean commit");
   assert.match(referenceRemote.stdout.trim(), /(?:github\.com[:/])magnusihle\/structile-northstar(?:\.git)?$/);
   const referenceSourcePaths = (await listFiles(referenceRoot)).filter((path) => /^(?:src|app|apps|packages)\/.+\.(?:ts|tsx|js|mjs)$/.test(path));
-  const candidateHashes = new Map();
+  const candidateHashes = new Map<string, string>();
   for (const path of sourcePaths) candidateHashes.set(sha256(await readFile(resolve(candidate, path))), path);
-  const copiedReferenceFiles = [];
+  const copiedReferenceFiles: Array<{ reference: string; candidate: string }> = [];
   for (const path of referenceSourcePaths) {
     const match = candidateHashes.get(sha256(await readFile(resolve(referenceRoot, path))));
     if (match) copiedReferenceFiles.push({ reference: path, candidate: match });
@@ -97,12 +114,12 @@ async function architectureBoundaries({ candidate, artifactDir, options }) {
   return { measurements: { packages: packageNames.length, forbiddenBoundaryHits: 0, copiedReferenceFiles: 0, referenceCommit: referenceCommit.stdout.trim() }, artifactNames: ["dependency-graph.json", "boundary-report.json", "copy-similarity.json"] };
 }
 
-function dockerEnvironment() {
+function dockerEnvironment(): NodeJS.ProcessEnv {
   const allowed = ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "BUILDX_CONFIG"];
   return Object.fromEntries(allowed.flatMap((key) => process.env[key] ? [[key, process.env[key]]] : []));
 }
 
-async function composeSmoke({ candidate, artifactDir, options }) {
+async function composeSmoke({ candidate, artifactDir, options }: SuiteContext): Promise<SuiteResult> {
   const secretDir = await mkdtemp(resolve(tmpdir(), "structile-compose-secret-"));
   const secretPath = resolve(secretDir, "postgres-password");
   await writeFile(secretPath, randomBytes(32).toString("hex"), { mode: 0o600 });
@@ -121,12 +138,12 @@ async function composeSmoke({ candidate, artifactDir, options }) {
     assert.equal(services.redis.read_only, true);
     assert.equal(services.postgres.ports, undefined);
     assert.equal(services.redis.ports, undefined);
-    assert.ok((services.postgres.volumes ?? []).some((mount) => mount.type === "volume" && mount.target === "/var/lib/postgresql/data"));
+    assert.ok((services.postgres.volumes ?? []).some((mount: AnyRecord) => mount.type === "volume" && mount.target === "/var/lib/postgresql/data"));
     assert.equal(services.redis.volumes, undefined);
     assert.deepEqual(services.redis.command.slice(0, 7), ["redis-server", "--dir", "/tmp", "--save", "", "--appendonly", "no"]);
     assert.equal(services.postgres.environment.POSTGRES_PASSWORD_FILE, "/run/secrets/postgres_password");
     assert.equal(Object.hasOwn(services.postgres.environment, "POSTGRES_PASSWORD"), false);
-    const healthTimeline = [];
+    const healthTimeline: AnyRecord[] = [];
     let foundationHealthImageDigest = "not-built-static-config";
     if (options["fresh-volumes"] !== undefined) {
       const project = `structile-g0-${process.pid}`;
@@ -134,9 +151,9 @@ async function composeSmoke({ candidate, artifactDir, options }) {
         const started = new Date().toISOString();
         await command("docker", ["compose", "-p", project, "up", "--build", "--wait"], { cwd: candidate, env: environment, timeout: 600_000, maxBuffer: 16 * 1024 * 1024 });
         const state = await command("docker", ["compose", "-p", project, "ps", "--format", "json"], { cwd: candidate, env: environment });
-        const stateRows = state.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+        const stateRows: AnyRecord[] = state.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
         assert.equal(stateRows.length, 3);
-        assert.ok(stateRows.every((row) => row.State === "running" && row.Health === "healthy"));
+        assert.ok(stateRows.every((row: AnyRecord) => row.State === "running" && row.Health === "healthy"));
         const imageState = await command("docker", ["image", "inspect", `${project}-foundation-health`, "--format", "{{.Id}}"], { cwd: candidate, env: environment });
         foundationHealthImageDigest = imageState.stdout.trim();
         assert.match(foundationHealthImageDigest, /^sha256:[a-f0-9]{64}$/);
@@ -157,7 +174,7 @@ async function composeSmoke({ candidate, artifactDir, options }) {
   }
 }
 
-async function agentAdapters({ candidate, artifactDir }) {
+async function agentAdapters({ candidate, artifactDir }: SuiteContext): Promise<SuiteResult> {
   await command("npm", ["run", "build", "--workspace", "@structile/agent-harness"], { cwd: candidate, timeout: 180_000 });
   const modulePath = resolve(candidate, "packages/agent-harness/dist/index.js");
   const harness = await import(`${pathToFileURL(modulePath).href}?conformance=${Date.now()}`);
@@ -169,10 +186,11 @@ async function agentAdapters({ candidate, artifactDir }) {
     budget: { timeoutMs: 30_000, maxOutputBytes: 65_536 }, prompt: "Protected deterministic adapter fixture"
   };
   const context = { workspace: candidate, resultSchemaPath: "/protected/agent-result.schema.json", resultPath: "/isolated/result.json", environment: { PATH: "/usr/bin", CODEX_API_KEY: "secret-canary" } };
-  let invocation;
+  let invocation: AnyRecord | undefined;
   const expected = { status: "completed", changedPaths: [], commits: [], commands: [], claims: [], risks: [], unresolvedQuestions: [], requestedApprovals: [], usage: { durationMs: 1 } };
-  const codex = new harness.CodexAdapter({ run: async (value) => { invocation = value; return { exitCode: 0, stdout: JSON.stringify(expected), stderr: "" }; } });
+  const codex = new harness.CodexAdapter({ run: async (value: AnyRecord) => { invocation = value; return { exitCode: 0, stdout: JSON.stringify(expected), stderr: "" }; } });
   assert.deepEqual(await codex.execute(request, context), expected);
+  assert.ok(invocation);
   assert.ok(invocation.args.includes("--ephemeral"));
   assert.ok(invocation.args.includes("workspace-write"));
   assert.ok(!invocation.args.includes("danger-full-access"));
@@ -199,7 +217,7 @@ async function agentAdapters({ candidate, artifactDir }) {
   return { measurements: { providers: 2, normalized: true, budgetControls: 4, credentialCanaryExposures: 0 }, artifactNames: ["adapter-results.json", "sandbox-audit.json"] };
 }
 
-async function harnessPolicy({ candidate, artifactDir, options }) {
+async function harnessPolicy({ candidate, artifactDir, options }: SuiteContext): Promise<SuiteResult> {
   const permissions = await readJson(resolve(candidate, "policies/agent/permissions.json"));
   const protectedPaths = await readJson(resolve(candidate, "policies/agent/protected-paths.json"));
   const network = await readJson(resolve(candidate, "policies/agent/network-policy.json"));
@@ -214,7 +232,7 @@ async function harnessPolicy({ candidate, artifactDir, options }) {
   const expectedDigest = process.env.STRUCTILE_POLICY_ATTESTATION_SHA256;
   const workflowIdentity = process.env.STRUCTILE_WORKFLOW_IDENTITY;
   const attestationRef = process.env.STRUCTILE_ATTESTATION_REF;
-  if (!enforcement || !expectedDigest || !workflowIdentity || !attestationRef || workflowIdentity.startsWith("local-unsigned")) {
+  if (typeof enforcement !== "string" || !expectedDigest || !workflowIdentity || !attestationRef || workflowIdentity.startsWith("local-unsigned")) {
     throw new Error("protected repository/sandbox probe output and workflow-bound digest are required; policy definitions or a local attestation cannot pass HAR-003");
   }
   const attestationPath = resolve(enforcement);
@@ -231,7 +249,7 @@ async function harnessPolicy({ candidate, artifactDir, options }) {
     conformance: "https://github.com/magnusihle/structile-conformance",
     northstar: "https://github.com/magnusihle/structile-northstar"
   });
-  const authorityOutcomes = new Map(attestation.authorityProbes.map((probe) => [probe.action, probe]));
+  const authorityOutcomes = new Map<string, AnyRecord>(attestation.authorityProbes.map((probe: AnyRecord) => [String(probe.action), probe]));
   for (const action of attempts) {
     const probe = authorityOutcomes.get(action);
     assert.equal(probe?.outcome, "denied");
@@ -240,12 +258,12 @@ async function harnessPolicy({ candidate, artifactDir, options }) {
   assert.equal(authorityOutcomes.get("allowed-branch-pull-request")?.outcome, "allowed");
   assert.match(authorityOutcomes.get("allowed-branch-pull-request")?.auditRef ?? "", /^https:\/\//);
   for (const destination of network.forbiddenDestinations) {
-    const probe = attestation.egressProbes.find((entry) => entry.destination === destination);
+    const probe: AnyRecord | undefined = (attestation.egressProbes as AnyRecord[]).find((entry) => entry.destination === destination);
     assert.equal(probe?.outcome, "denied");
     assert.match(probe?.auditRef ?? "", /^https:\/\//);
   }
   for (const attack of ["forged", "mismatched-candidate", "mismatched-runner"]) {
-    const probe = attestation.evidenceProbes.find((entry) => entry.attack === attack);
+    const probe: AnyRecord | undefined = (attestation.evidenceProbes as AnyRecord[]).find((entry) => entry.attack === attack);
     assert.equal(probe?.outcome, "rejected");
     assert.match(probe?.auditRef ?? "", /^https:\/\//);
   }
@@ -255,7 +273,7 @@ async function harnessPolicy({ candidate, artifactDir, options }) {
   return { measurements: { forbiddenAttempts: attempts.length, denied: attempts.length }, artifactNames: ["permission-matrix.json", "egress-denials.json", "evidence-forgery.json"] };
 }
 
-async function openSource({ candidate, artifactDir }) {
+async function openSource({ candidate, artifactDir }: SuiteContext): Promise<SuiteResult> {
   const license = await readFile(resolve(candidate, "LICENSE"), "utf8");
   assert.match(license, /Apache License\s+Version 2\.0/);
   for (const path of ["NOTICE", "THIRD_PARTY_NOTICES.md", "SECURITY.md", "CONTRIBUTING.md", "GOVERNANCE.md"]) await readFile(resolve(candidate, path), "utf8");
@@ -267,18 +285,21 @@ async function openSource({ candidate, artifactDir }) {
   for (const path of files.filter((entry) => /\.(?:json|ya?ml|ts|tsx|js|mjs|md|env)$/.test(entry))) {
     if (path.startsWith("docs/planning/") || path === "verification/test-catalog.json") continue;
     const content = await readFile(resolve(candidate, path), "utf8");
-    for (const match of content.matchAll(secretPattern)) if (!/(?:canary|example|local-only|do-not-use)/i.test(match[1])) suspect.push(path);
+    for (const match of content.matchAll(secretPattern)) {
+      const capturedSecret = match[1];
+      if (capturedSecret && !/(?:canary|example|local-only|do-not-use)/i.test(capturedSecret)) suspect.push(path);
+    }
   }
   assert.deepEqual(suspect, []);
   const lock = await readJson(resolve(candidate, "package-lock.json"));
-  const dependencies = Object.entries(lock.packages ?? {})
+  const dependencies = Object.entries((lock.packages ?? {}) as Record<string, AnyRecord>)
     .filter(([path, value]) => path.startsWith("node_modules/") && !value.link && value.version)
     .map(([path, value]) => ({ name: path.slice("node_modules/".length), version: value.version, license: value.license }));
   const allowedLicenses = new Set(["Apache-2.0", "MIT", "ISC", "0BSD"]);
   const licenseFindings = dependencies.filter((dependency) => !allowedLicenses.has(dependency.license));
   assert.deepEqual(licenseFindings, []);
   const boundaries = await readJson(resolve(candidate, "architecture/package-boundaries.json"));
-  assert.deepEqual(boundaries.packages.map((item) => item.name), packageNames);
+  assert.deepEqual(boundaries.packages.map((item: AnyRecord) => item.name), packageNames);
   for (const item of boundaries.packages) await readJson(resolve(candidate, item.path, "package.json"));
   const proprietaryDomainHits = [];
   for (const path of files.filter((entry) => /^(?:apps|packages)\/.+\.(?:ts|tsx|js|mjs|json)$/.test(entry))) {
@@ -299,7 +320,7 @@ async function openSource({ candidate, artifactDir }) {
   return { measurements: { dependencies: dependencies.length, licenseFindings: 0, secretFindings: 0, proprietaryDomainHits: 0 }, artifactNames: ["license-report.json", "public-boundary.json", "notice-report.json", "secret-scan.json"] };
 }
 
-export const suites = Object.freeze({
+export const suites: Readonly<Record<SuiteSlug, Suite>> = Object.freeze({
   "architecture-boundaries": architectureBoundaries,
   "compose-smoke": composeSmoke,
   "agent-adapters": agentAdapters,
@@ -307,7 +328,7 @@ export const suites = Object.freeze({
   "open-source": openSource
 });
 
-export function configDigest(slug, options) {
+export function configDigest(slug: string, options: SuiteOptions): string {
   const redacted = Object.fromEntries(Object.entries(options).filter(([key]) => !/token|secret|password/i.test(key)));
   return sha256(JSON.stringify({ slug, options: redacted }));
 }

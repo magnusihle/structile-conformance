@@ -7,4 +7,4 @@ COPY --chown=node:node requirements ./requirements
 COPY --chown=node:node verification ./verification
 COPY --chown=node:node tooling ./tooling
 USER node
-ENTRYPOINT ["node", "src/cli.mjs"]
+ENTRYPOINT ["node", "src/cli.ts"]

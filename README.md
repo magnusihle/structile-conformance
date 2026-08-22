@@ -10,10 +10,11 @@ The G0 bootstrap imports the approved requirement/test/evidence catalogs byte-fo
 
 ```sh
 npm ci
-npm test
-npm run planning:check
-node src/cli.mjs list
+npm run check
+node src/cli.ts list
 ```
+
+Authored source, tests, and executable repository scripts are TypeScript. Generated JavaScript is allowed; the two protected planning `.mjs` inputs are the only named exceptions enforced by `npm run language:check`.
 
 Runner contract:
 
