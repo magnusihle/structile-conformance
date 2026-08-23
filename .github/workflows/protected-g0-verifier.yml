@@ -1,0 +1,462 @@
+name: Protected G0 verifier
+
+run-name: G0 ${{ inputs.core_sha }} / Northstar ${{ inputs.northstar_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_sha:
+        description: Exact 40-character Structile main commit
+        required: true
+        type: string
+      northstar_sha:
+        description: Exact 40-character Northstar main commit
+        required: true
+        type: string
+      probe_repository:
+        description: Private synthetic authority-probe repository
+        required: true
+        default: magnusihle/structile-g0-authority-probe
+        type: string
+
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+  packages: write
+
+concurrency:
+  group: protected-g0-verifier
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Protected G0 evidence
+    environment: protected-verifier
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CORE_SHA: ${{ inputs.core_sha }}
+      NORTHSTAR_SHA: ${{ inputs.northstar_sha }}
+      PROBE_REPOSITORY: ${{ inputs.probe_repository }}
+    steps:
+      - name: Check out protected conformance authority
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          path: conformance
+          persist-credentials: false
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: conformance/.nvmrc
+
+      - name: Mint the constrained builder probe token
+        id: builder-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.STRUCTILE_BUILDER_APP_ID }}
+          private-key: ${{ secrets.STRUCTILE_BUILDER_APP_PRIVATE_KEY }}
+          owner: magnusihle
+          repositories: |
+            structile
+            structile-northstar
+            structile-g0-authority-probe
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out exact core candidate
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: magnusihle/structile
+          ref: ${{ inputs.core_sha }}
+          fetch-depth: 0
+          path: core
+          persist-credentials: false
+          token: ${{ steps.builder-token.outputs.token }}
+
+      - name: Check out exact private Northstar candidate
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: magnusihle/structile-northstar
+          ref: ${{ inputs.northstar_sha }}
+          fetch-depth: 0
+          path: northstar
+          persist-credentials: false
+          token: ${{ steps.builder-token.outputs.token }}
+
+      - name: Verify immutable candidate identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CORE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$NORTHSTAR_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$PROBE_REPOSITORY" = 'magnusihle/structile-g0-authority-probe'
+          test "$(git -C conformance rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C core rev-parse HEAD)" = "$CORE_SHA"
+          test "$(git -C northstar rev-parse HEAD)" = "$NORTHSTAR_SHA"
+          test -z "$(git -C conformance status --porcelain)"
+          test -z "$(git -C core status --porcelain)"
+          test -z "$(git -C northstar status --porcelain)"
+
+      - name: Install frozen dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --prefix conformance
+          npm ci --ignore-scripts --prefix core
+          npm ci --ignore-scripts --prefix northstar
+
+      - name: Run candidate checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run check --prefix conformance
+          npm run check --prefix core
+          npm run check --prefix northstar
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push exact conformance runner
+        id: image
+        shell: bash
+        working-directory: conformance
+        run: |
+          set -euo pipefail
+          image_name='ghcr.io/magnusihle/structile-conformance'
+          image_tag="sha-${GITHUB_SHA}"
+          image_ref="${image_name}:${image_tag}"
+          docker build --file Containerfile --tag "$image_ref" .
+          docker push "$image_ref"
+          repository_digest=$(docker image inspect "$image_ref" --format '{{index .RepoDigests 0}}')
+          digest=${repository_digest#*@}
+          test "$repository_digest" = "${image_name}@${digest}"
+          test "${#digest}" -eq 71
+          docker run --rm "$repository_digest" list
+          echo "name=$image_name" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "reference=$repository_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest conformance runner image
+        id: image-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Verify runner image provenance
+        shell: bash
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.image-attestation.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://$RUNNER_REFERENCE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/protected-g0-verifier.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "$GITHUB_SHA" \
+            --bundle "$ATTESTATION_BUNDLE" \
+            --format json > "$RUNNER_TEMP/runner-attestation-verification.json"
+
+      - name: Create evidence workspace
+        id: evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/g0-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          attestation_path="${RUNNER_TEMP}/g0-enforcement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          bundle_path="${RUNNER_TEMP}/structile-g0-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          mkdir -p "$evidence_dir"
+          echo "directory=$evidence_dir" >> "$GITHUB_OUTPUT"
+          echo "enforcement=$attestation_path" >> "$GITHUB_OUTPUT"
+          echo "bundle=$bundle_path" >> "$GITHUB_OUTPUT"
+
+      - name: Run deterministic protected G0 suites
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ steps.evidence.outputs.directory }}
+          RUNNER_REFERENCE: ${{ steps.image.outputs.reference }}
+          STRUCTILE_ATTESTATION_REF: ${{ steps.image-attestation.outputs.attestation-url }}
+          STRUCTILE_CONFORMANCE_HARDWARE: github-hosted-ubuntu-24.04
+          STRUCTILE_CONFORMANCE_PROFILE: protected-g0
+          STRUCTILE_CONFORMANCE_REGION: github
+          STRUCTILE_NORTHSTAR_CHECKOUT: ${{ github.workspace }}/northstar
+          STRUCTILE_RUNNER_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          STRUCTILE_WORKFLOW_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/protected-g0-verifier.yml@${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/conformance-home" "$RUNNER_TEMP/conformance-tmp"
+          docker_socket_gid=$(stat -c '%g' /var/run/docker.sock)
+          runner=(
+            docker run --rm --read-only --network none
+            --cap-drop ALL --security-opt no-new-privileges
+            --user "$(id -u):$(id -g)" --group-add "$docker_socket_gid"
+            --volume /var/run/docker.sock:/var/run/docker.sock:ro
+            --volume "$GITHUB_WORKSPACE/core:$GITHUB_WORKSPACE/core"
+            --volume "$GITHUB_WORKSPACE/northstar:$GITHUB_WORKSPACE/northstar:ro"
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP"
+            --env "HOME=$RUNNER_TEMP/conformance-home"
+            --env "TMPDIR=$RUNNER_TEMP/conformance-tmp"
+            --env "STRUCTILE_ATTESTATION_REF=$STRUCTILE_ATTESTATION_REF"
+            --env "STRUCTILE_CONFORMANCE_HARDWARE=$STRUCTILE_CONFORMANCE_HARDWARE"
+            --env "STRUCTILE_CONFORMANCE_PROFILE=$STRUCTILE_CONFORMANCE_PROFILE"
+            --env "STRUCTILE_CONFORMANCE_REGION=$STRUCTILE_CONFORMANCE_REGION"
+            --env "STRUCTILE_NORTHSTAR_CHECKOUT=$STRUCTILE_NORTHSTAR_CHECKOUT"
+            --env "STRUCTILE_RUNNER_IMAGE_DIGEST=$STRUCTILE_RUNNER_IMAGE_DIGEST"
+            --env "STRUCTILE_WORKFLOW_IDENTITY=$STRUCTILE_WORKFLOW_IDENTITY"
+            --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT
+            "$RUNNER_REFERENCE"
+          )
+          "${runner[@]}" run architecture-boundaries \
+            --candidate "$GITHUB_WORKSPACE/core" \
+            --reference northstar \
+            --evidence-dir "$EVIDENCE_DIR"
+          "${runner[@]}" run compose-smoke \
+            --candidate "$GITHUB_WORKSPACE/core" \
+            --fresh-volumes \
+            --evidence-dir "$EVIDENCE_DIR"
+          "${runner[@]}" run agent-adapters \
+            --candidate "$GITHUB_WORKSPACE/core" \
+            --evidence-dir "$EVIDENCE_DIR"
+          "${runner[@]}" run open-source \
+            --candidate "$GITHUB_WORKSPACE/core" \
+            --evidence-dir "$EVIDENCE_DIR"
+
+      - name: Run protected META-001 validation
+        shell: bash
+        env:
+          RUNNER_REFERENCE: ${{ steps.image.outputs.reference }}
+          STRUCTILE_ATTESTATION_REF: ${{ steps.image-attestation.outputs.attestation-url }}
+          STRUCTILE_CONFORMANCE_HARDWARE: github-hosted-ubuntu-24.04
+          STRUCTILE_CONFORMANCE_PROFILE: protected-g0
+          STRUCTILE_CONFORMANCE_REGION: github
+          STRUCTILE_CORE_CHECKOUT: ${{ github.workspace }}/core
+          STRUCTILE_EVIDENCE_DIR: ${{ steps.evidence.outputs.directory }}
+          STRUCTILE_RUNNER_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          STRUCTILE_WORKFLOW_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/protected-g0-verifier.yml@${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/conformance-home" "$RUNNER_TEMP/conformance-tmp"
+          docker run --rm --read-only --network none \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            --volume "$GITHUB_WORKSPACE/core:$GITHUB_WORKSPACE/core:ro" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --env "HOME=$RUNNER_TEMP/conformance-home" \
+            --env "TMPDIR=$RUNNER_TEMP/conformance-tmp" \
+            --env "STRUCTILE_ATTESTATION_REF=$STRUCTILE_ATTESTATION_REF" \
+            --env "STRUCTILE_CONFORMANCE_HARDWARE=$STRUCTILE_CONFORMANCE_HARDWARE" \
+            --env "STRUCTILE_CONFORMANCE_PROFILE=$STRUCTILE_CONFORMANCE_PROFILE" \
+            --env "STRUCTILE_CONFORMANCE_REGION=$STRUCTILE_CONFORMANCE_REGION" \
+            --env "STRUCTILE_CORE_CHECKOUT=$STRUCTILE_CORE_CHECKOUT" \
+            --env "STRUCTILE_EVIDENCE_DIR=$STRUCTILE_EVIDENCE_DIR" \
+            --env "STRUCTILE_RUNNER_IMAGE_DIGEST=$STRUCTILE_RUNNER_IMAGE_DIGEST" \
+            --env "STRUCTILE_WORKFLOW_IDENTITY=$STRUCTILE_WORKFLOW_IDENTITY" \
+            --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT \
+            --entrypoint node \
+            "$RUNNER_REFERENCE" src/protected-meta-evidence.ts
+
+      - name: Run protected authority, egress, and forgery probes
+        shell: bash
+        env:
+          RUNNER_REFERENCE: ${{ steps.image.outputs.reference }}
+          STRUCTILE_BUILDER_TOKEN: ${{ steps.builder-token.outputs.token }}
+          STRUCTILE_CORE_CHECKOUT: ${{ github.workspace }}/core
+          STRUCTILE_CORE_SHA: ${{ env.CORE_SHA }}
+          STRUCTILE_EVIDENCE_DIR: ${{ steps.evidence.outputs.directory }}
+          STRUCTILE_ENFORCEMENT_ATTESTATION: ${{ steps.evidence.outputs.enforcement }}
+          STRUCTILE_PROBE_REPOSITORY: ${{ env.PROBE_REPOSITORY }}
+          STRUCTILE_RUNNER_IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/conformance-home" "$RUNNER_TEMP/conformance-tmp"
+          docker_socket_gid=$(stat -c '%g' /var/run/docker.sock)
+          docker run --rm --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --group-add "$docker_socket_gid" \
+            --volume /var/run/docker.sock:/var/run/docker.sock:ro \
+            --volume "$GITHUB_WORKSPACE/core:$GITHUB_WORKSPACE/core:ro" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --env "HOME=$RUNNER_TEMP/conformance-home" \
+            --env "TMPDIR=$RUNNER_TEMP/conformance-tmp" \
+            --env STRUCTILE_BUILDER_TOKEN \
+            --env "STRUCTILE_CORE_CHECKOUT=$STRUCTILE_CORE_CHECKOUT" \
+            --env "STRUCTILE_CORE_SHA=$STRUCTILE_CORE_SHA" \
+            --env "STRUCTILE_EVIDENCE_DIR=$STRUCTILE_EVIDENCE_DIR" \
+            --env "STRUCTILE_ENFORCEMENT_ATTESTATION=$STRUCTILE_ENFORCEMENT_ATTESTATION" \
+            --env "STRUCTILE_PROBE_REPOSITORY=$STRUCTILE_PROBE_REPOSITORY" \
+            --env "STRUCTILE_RUNNER_IMAGE_REFERENCE=$STRUCTILE_RUNNER_IMAGE_REFERENCE" \
+            --env GITHUB_API_URL --env GITHUB_REPOSITORY --env GITHUB_RUN_ID --env GITHUB_SERVER_URL \
+            --entrypoint node \
+            "$RUNNER_REFERENCE" src/protected-g0-probe.ts
+
+      - name: Hash enforcement attestation
+        id: enforcement
+        shell: bash
+        env:
+          ENFORCEMENT_ATTESTATION: ${{ steps.evidence.outputs.enforcement }}
+        run: |
+          set -euo pipefail
+          digest="sha256:$(sha256sum "$ENFORCEMENT_ATTESTATION" | awk '{print $1}')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Run HAR-003 against protected probe output
+        shell: bash
+        env:
+          ENFORCEMENT_ATTESTATION: ${{ steps.evidence.outputs.enforcement }}
+          EVIDENCE_DIR: ${{ steps.evidence.outputs.directory }}
+          RUNNER_REFERENCE: ${{ steps.image.outputs.reference }}
+          STRUCTILE_ATTESTATION_REF: ${{ steps.image-attestation.outputs.attestation-url }}
+          STRUCTILE_CONFORMANCE_HARDWARE: github-hosted-ubuntu-24.04
+          STRUCTILE_CONFORMANCE_PROFILE: protected-g0
+          STRUCTILE_CONFORMANCE_REGION: github
+          STRUCTILE_POLICY_ATTESTATION_SHA256: ${{ steps.enforcement.outputs.digest }}
+          STRUCTILE_RUNNER_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          STRUCTILE_WORKFLOW_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/protected-g0-verifier.yml@${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/conformance-home" "$RUNNER_TEMP/conformance-tmp"
+          docker run --rm --read-only --network none \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            --volume "$GITHUB_WORKSPACE/core:$GITHUB_WORKSPACE/core:ro" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP" \
+            --env "HOME=$RUNNER_TEMP/conformance-home" \
+            --env "TMPDIR=$RUNNER_TEMP/conformance-tmp" \
+            --env "STRUCTILE_ATTESTATION_REF=$STRUCTILE_ATTESTATION_REF" \
+            --env "STRUCTILE_CONFORMANCE_HARDWARE=$STRUCTILE_CONFORMANCE_HARDWARE" \
+            --env "STRUCTILE_CONFORMANCE_PROFILE=$STRUCTILE_CONFORMANCE_PROFILE" \
+            --env "STRUCTILE_CONFORMANCE_REGION=$STRUCTILE_CONFORMANCE_REGION" \
+            --env "STRUCTILE_POLICY_ATTESTATION_SHA256=$STRUCTILE_POLICY_ATTESTATION_SHA256" \
+            --env "STRUCTILE_RUNNER_IMAGE_DIGEST=$STRUCTILE_RUNNER_IMAGE_DIGEST" \
+            --env "STRUCTILE_WORKFLOW_IDENTITY=$STRUCTILE_WORKFLOW_IDENTITY" \
+            --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT \
+            "$RUNNER_REFERENCE" run harness-policy \
+            --candidate "$GITHUB_WORKSPACE/core" \
+            --attempt-all-forbidden \
+            --enforcement-attestation "$ENFORCEMENT_ATTESTATION" \
+            --evidence-dir "$EVIDENCE_DIR"
+
+      - name: Validate complete protected evidence set
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ steps.evidence.outputs.directory }}
+          RUNNER_REFERENCE: ${{ steps.image.outputs.reference }}
+          RUNNER_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' evidence_files < <(find "$EVIDENCE_DIR" -name evidence.json -type f -print0)
+          test "${#evidence_files[@]}" -eq 6
+          actual_ids=$(printf '%s\0' "${evidence_files[@]}" | xargs -0 -n1 jq -r .testId | sort | paste -sd, -)
+          test "$actual_ids" = 'ARCH-001,DEV-001,HAR-001,HAR-003,META-001,OSS-001'
+          for evidence_file in "${evidence_files[@]}"; do
+            test "$(jq -r .status "$evidence_file")" = passed
+            test "$(jq -r .exitCode "$evidence_file")" = 0
+            test "$(jq -r .candidate.commitSha "$evidence_file")" = "$CORE_SHA"
+            test "$(jq -r .runner.imageDigest "$evidence_file")" = "$RUNNER_DIGEST"
+            test "$(jq -r .measurements.localUnsigned "$evidence_file")" = false
+            docker run --rm --read-only --network none \
+              --cap-drop ALL --security-opt no-new-privileges \
+              --user "$(id -u):$(id -g)" \
+              --volume "$RUNNER_TEMP:$RUNNER_TEMP:ro" \
+              "$RUNNER_REFERENCE" verify-evidence "$evidence_file" \
+              --candidate-sha "$CORE_SHA" \
+              --runner-digest "$RUNNER_DIGEST"
+          done
+
+      - name: Create deterministic evidence bundle
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.evidence.outputs.bundle }}
+          ENFORCEMENT_ATTESTATION: ${{ steps.evidence.outputs.enforcement }}
+          EVIDENCE_DIR: ${{ steps.evidence.outputs.directory }}
+        run: |
+          set -euo pipefail
+          staging="${RUNNER_TEMP}/g0-bundle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$staging"
+          cp -R "$EVIDENCE_DIR" "$staging/evidence"
+          cp "$ENFORCEMENT_ATTESTATION" "$staging/enforcement-attestation.json"
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -C "$staging" -czf "$BUNDLE_PATH" .
+          sha256sum "$BUNDLE_PATH"
+
+      - name: Attest protected evidence bundle
+        id: evidence-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ steps.evidence.outputs.bundle }}
+
+      - name: Verify evidence bundle provenance
+        shell: bash
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.evidence-attestation.outputs.bundle-path }}
+          BUNDLE_PATH: ${{ steps.evidence.outputs.bundle }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "$BUNDLE_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/protected-g0-verifier.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "$GITHUB_SHA" \
+            --bundle "$ATTESTATION_BUNDLE" \
+            --format json > "$RUNNER_TEMP/evidence-attestation-verification.json"
+
+      - name: Upload protected evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: protected-g0-evidence-${{ inputs.core_sha }}
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            ${{ steps.evidence.outputs.directory }}
+            ${{ steps.evidence.outputs.enforcement }}
+            ${{ steps.evidence.outputs.bundle }}
+            ${{ steps.image-attestation.outputs.bundle-path }}
+            ${{ steps.evidence-attestation.outputs.bundle-path }}
+            ${{ runner.temp }}/runner-attestation-verification.json
+            ${{ runner.temp }}/evidence-attestation-verification.json
+
+      - name: Record attestation references
+        shell: bash
+        env:
+          CONFORMANCE_SHA: ${{ github.sha }}
+          EVIDENCE_ATTESTATION_URL: ${{ steps.evidence-attestation.outputs.attestation-url }}
+          IMAGE_ATTESTATION_URL: ${{ steps.image-attestation.outputs.attestation-url }}
+          RUNNER_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: |
+          {
+            echo '## Protected G0 evidence'
+            echo
+            printf '%s\n' "- Core candidate: \`$CORE_SHA\`"
+            printf '%s\n' "- Conformance authority: \`$CONFORMANCE_SHA\`"
+            printf '%s\n' "- Northstar candidate: \`$NORTHSTAR_SHA\`"
+            printf '%s\n' "- Runner: \`$RUNNER_REFERENCE\`"
+            echo "- Runner attestation: $IMAGE_ATTESTATION_URL"
+            echo "- Evidence attestation: $EVIDENCE_ATTESTATION_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failed-g0-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ steps.evidence.outputs.directory }}
+            ${{ steps.evidence.outputs.enforcement }}
+
+      - name: Log out of GHCR
+        if: always()
+        shell: bash
+        run: docker logout ghcr.io || true
