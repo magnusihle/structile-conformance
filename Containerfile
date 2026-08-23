@@ -1,4 +1,10 @@
 FROM node:24.19.0-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
+
+RUN apk add --no-cache \
+    docker-cli=29.5.3-r0 \
+    docker-cli-compose=5.1.4-r0 \
+    git=2.54.0-r0
+
 ENV NODE_ENV=production
 WORKDIR /runner
 COPY --chown=node:node package.json package-lock.json LICENSE NOTICE ./
