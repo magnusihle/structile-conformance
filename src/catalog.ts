@@ -14,7 +14,8 @@ export const suiteIds = Object.freeze({
   "spec-fuzz": "SPEC-001",
   "action-contract": "ACT-001",
   "capability-contract": "CAP-001",
-  "graphify-policy": "HAR-004"
+  "graphify-policy": "HAR-004",
+  "spec-migrations": "SPEC-002"
 });
 
 export type SuiteSlug = keyof typeof suiteIds;
