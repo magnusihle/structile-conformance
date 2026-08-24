@@ -20,17 +20,18 @@ test("protected planning inputs match the approved bootstrap hashes", async () =
   }
 });
 
-test("runner exposes only the five CLI-backed G0 suites", async () => {
-  assert.deepEqual(Object.keys(suiteIds), ["architecture-boundaries", "compose-smoke", "agent-adapters", "harness-policy", "open-source"]);
+test("runner exposes only the six CLI-backed G0/G1 suites", async () => {
+  assert.deepEqual(Object.keys(suiteIds), ["architecture-boundaries", "compose-smoke", "agent-adapters", "harness-policy", "open-source", "design-system"]);
+  const gates: Record<string, string> = { "design-system": "G1" };
   for (const [slug, id] of Object.entries(suiteIds)) {
     const suite = await resolveSuite(slug);
     assert.ok(suite);
     assert.equal(suite.id, id);
-    assert.equal(suite.gate, "G0");
+    assert.equal(suite.gate, gates[slug] ?? "G0");
     assert.equal(typeof suites[slug as SuiteSlug], "function");
   }
   const { stdout } = await runFile(process.execPath, [resolve(root, "src/cli.ts"), "list"]);
-  assert.equal(JSON.parse(stdout).length, 5);
+  assert.equal(JSON.parse(stdout).length, 6);
 });
 
 test("unknown or not-yet-implemented suites fail closed with exit 2", async () => {
