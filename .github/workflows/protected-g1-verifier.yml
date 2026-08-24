@@ -13,6 +13,11 @@ on:
         description: Exact 40-character Northstar main commit
         required: true
         type: string
+      suites:
+        description: Optional comma-separated G1 test IDs for a partial run; gate closure requires a full run
+        required: false
+        default: ""
+        type: string
 
 permissions:
   attestations: write
@@ -29,10 +34,13 @@ jobs:
     name: Protected G1 evidence
     environment: protected-verifier
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # GitHub-hosted maximum; catalog worst-case serial budgets exceed even this,
+    # so long suites are expected to run via partial dispatch (suites input).
+    timeout-minutes: 360
     env:
       CORE_SHA: ${{ inputs.core_sha }}
       NORTHSTAR_SHA: ${{ inputs.northstar_sha }}
+      SUITES_FILTER: ${{ inputs.suites }}
     steps:
       - name: Check out protected conformance authority
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -126,13 +134,25 @@ jobs:
             plan.push({ id: test.id, slug: parts[2], args });
           }
           if (plan.length === 0) throw new Error("no G1 tests found in catalog");
-          process.stdout.write(JSON.stringify(plan));
+          const filter = (process.env.SUITES_FILTER ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+          let selected = plan;
+          if (filter.length > 0) {
+            const known = new Set(plan.map((entry) => entry.id));
+            for (const id of filter) {
+              if (!known.has(id)) throw new Error(`requested suite ${id} is not a G1 catalog test`);
+            }
+            selected = plan.filter((entry) => filter.includes(entry.id));
+          }
+          process.stdout.write(JSON.stringify(selected));
           NODE
           expected=$(jq -r '[.[].id] | sort | join(",")' "$RUNNER_TEMP/g1-plan.json")
           count=$(jq length "$RUNNER_TEMP/g1-plan.json")
-          echo "Dispatch plan: $count suites -> $expected"
+          mode=full
+          if [ -n "$SUITES_FILTER" ]; then mode=partial; fi
+          echo "Dispatch plan ($mode): $count suites -> $expected"
           echo "expected-ids=$expected" >> "$GITHUB_OUTPUT"
           echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         shell: bash
@@ -237,9 +257,10 @@ jobs:
             slug=$(jq -r .slug <<<"$entry")
             mapfile -t extra < <(jq -r '.args[]' <<<"$entry")
             echo "::group::${suite_id} (${slug})"
+            mkdir -p "$EVIDENCE_DIR/$suite_id"
             "${runner[@]}" run "$slug" ${extra[@]+"${extra[@]}"} \
               --candidate "$GITHUB_WORKSPACE/core" \
-              --evidence-dir "$EVIDENCE_DIR"
+              --evidence-dir "$EVIDENCE_DIR/$suite_id"
             echo "::endgroup::"
           done < <(jq -c '.[]' "$RUNNER_TEMP/g1-plan.json")
 
@@ -253,11 +274,15 @@ jobs:
           RUNNER_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
-          mapfile -d '' evidence_files < <(find "$EVIDENCE_DIR" -name evidence.json -type f -print0)
-          test "${#evidence_files[@]}" -eq "$EXPECTED_COUNT"
-          actual_ids=$(printf '%s\0' "${evidence_files[@]}" | xargs -0 -n1 jq -r .testId | sort | paste -sd, -)
-          test "$actual_ids" = "$EXPECTED_IDS"
-          for evidence_file in "${evidence_files[@]}"; do
+          # Per-suite subdirectories: each suite may emit exactly one envelope, and
+          # only for its own test ID — a suite cannot forge a sibling's evidence.
+          validated=0
+          while IFS= read -r entry; do
+            suite_id=$(jq -r .id <<<"$entry")
+            mapfile -d '' suite_files < <(find "$EVIDENCE_DIR/$suite_id" -name evidence.json -type f -print0)
+            test "${#suite_files[@]}" -eq 1
+            evidence_file="${suite_files[0]}"
+            test "$(jq -r .testId "$evidence_file")" = "$suite_id"
             test "$(jq -r .status "$evidence_file")" = passed
             test "$(jq -r .exitCode "$evidence_file")" = 0
             test "$(jq -r .candidate.commitSha "$evidence_file")" = "$CORE_SHA"
@@ -270,7 +295,13 @@ jobs:
               "$RUNNER_REFERENCE" verify-evidence "$evidence_file" \
               --candidate-sha "$CORE_SHA" \
               --runner-digest "$RUNNER_DIGEST"
-          done
+            validated=$((validated + 1))
+          done < <(jq -c '.[]' "$RUNNER_TEMP/g1-plan.json")
+          test "$validated" -eq "$EXPECTED_COUNT"
+          stray_count=$(find "$EVIDENCE_DIR" -name evidence.json -type f | wc -l)
+          test "$stray_count" -eq "$EXPECTED_COUNT"
+          actual_ids=$(find "$EVIDENCE_DIR" -name evidence.json -type f -print0 | xargs -0 -n1 jq -r .testId | sort | paste -sd, -)
+          test "$actual_ids" = "$EXPECTED_IDS"
 
       - name: Create deterministic evidence bundle
         shell: bash
@@ -311,7 +342,7 @@ jobs:
       - name: Upload protected evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: protected-g1-evidence-${{ inputs.core_sha }}
+          name: protected-g1-evidence-${{ inputs.core_sha }}${{ inputs.suites != '' && '-partial' || '' }}
           if-no-files-found: error
           retention-days: 90
           path: |
@@ -335,6 +366,7 @@ jobs:
           {
             echo '## Protected G1 evidence'
             echo
+            printf '%s\n' "- Mode: \`${{ steps.plan.outputs.mode }}\` (gate closure requires a full run)"
             printf '%s\n' "- Core candidate: \`$CORE_SHA\`"
             printf '%s\n' "- Conformance authority: \`$CONFORMANCE_SHA\`"
             printf '%s\n' "- Northstar candidate: \`$NORTHSTAR_SHA\`"
