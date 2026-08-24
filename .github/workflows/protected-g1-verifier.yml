@@ -275,7 +275,10 @@ jobs:
         run: |
           set -euo pipefail
           # Per-suite subdirectories: each suite may emit exactly one envelope, and
-          # only for its own test ID — a suite cannot forge a sibling's evidence.
+          # only for its own test ID. Detective control, not preventive: suite
+          # containers share the temp mount, so a forged sibling envelope is
+          # possible to WRITE but is caught here by the per-suite exactly-one
+          # check and the global stray-envelope count.
           validated=0
           while IFS= read -r entry; do
             suite_id=$(jq -r .id <<<"$entry")
