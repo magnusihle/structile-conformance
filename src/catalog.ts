@@ -9,7 +9,8 @@ export const suiteIds = Object.freeze({
   "compose-smoke": "DEV-001",
   "agent-adapters": "HAR-001",
   "harness-policy": "HAR-003",
-  "open-source": "OSS-001"
+  "open-source": "OSS-001",
+  "design-system": "DS-001"
 });
 
 export type SuiteSlug = keyof typeof suiteIds;
