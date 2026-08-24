@@ -34,6 +34,7 @@ export const INJECTION_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = Obje
   ["scheme-relative-url", /^\/\//]
 ] as const);
 
+/** Keys that must never be traversed as data. resolveParent refuses any path touching one. */
 export const POLLUTION_KEYS: readonly string[] = Object.freeze(["__proto__", "constructor", "prototype"]);
 
 /** Deterministic PRNG. Fuzzing must be reproducible from a recorded seed. */
@@ -125,12 +126,21 @@ export function collectPaths(value: unknown, path: readonly string[] = [], out: 
   return out;
 }
 
-/** Resolve the container holding `path`'s final segment, or undefined if absent. */
+/**
+ * Resolve the container holding `path`'s final segment, or undefined if absent.
+ * Refuses any path that traverses or targets a prototype-pollution key, so a
+ * fuzzer-supplied path can never hand back the shared Object.prototype (or a
+ * constructor/prototype chain) as a mutation target. Callers that specifically
+ * test pollution rejection must synthesise those payloads explicitly rather than
+ * reaching them through this resolver.
+ */
 export function resolveParent(root: unknown, path: readonly string[]): { parent: any; key: string } | undefined {
   if (path.length === 0) return undefined;
+  if (path.some((segment) => POLLUTION_KEYS.includes(segment))) return undefined;
   let node: any = root;
   for (const segment of path.slice(0, -1)) {
     if (node === null || typeof node !== "object") return undefined;
+    if (!Object.prototype.hasOwnProperty.call(node, segment)) return undefined;
     node = node[segment];
   }
   if (node === null || typeof node !== "object") return undefined;

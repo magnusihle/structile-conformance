@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   FORBIDDEN_STYLE_PATTERNS,
   INJECTION_PATTERNS,
+  POLLUTION_KEYS,
   LIMIT_CEILINGS,
   CONTRAST_MINIMUM,
   createRandom,
@@ -43,6 +44,20 @@ test("resolveParent finds present paths and returns undefined otherwise", () => 
   assert.equal(hit?.parent[hit.key], 10);
   assert.equal(resolveParent(root, ["a", "x", "y"]), undefined);
   assert.equal(resolveParent(root, []), undefined);
+  // An absent INTERMEDIATE segment must not fall through to an inherited property.
+  assert.equal(resolveParent(root, ["toString", "x"]), undefined);
+});
+
+test("resolveParent never yields Object.prototype for a pollution path", () => {
+  for (const key of POLLUTION_KEYS) {
+    // Ordinary object with no own pollution key: the naive walk would return
+    // { parent: Object.prototype, key: "polluted" }. The guard must refuse.
+    assert.equal(resolveParent({ a: {} }, [key, "polluted"]), undefined, key);
+    assert.equal(resolveParent({ a: {} }, ["a", key], ), undefined, `${key} as final segment`);
+  }
+  // Sanity: after every rejected attempt, the shared prototype is intact.
+  const canary = {} as Record<string, unknown>;
+  assert.equal(canary.polluted, undefined);
 });
 
 test("assertRejects demands the declared error name", async () => {
@@ -78,6 +93,11 @@ test("style and injection patterns catch their classes and pass clean values", (
   assert.match("<script>alert(1)</script>", injection.get("script-tag") as RegExp);
   assert.match("1; DROP TABLE users", injection.get("sql-metacharacter") as RegExp);
   for (const [, pattern] of INJECTION_PATTERNS) assert.doesNotMatch("Total revenue", pattern);
+  // Case-insensitivity regression: dropping /i on a letter-bearing pattern must fail here.
+  assert.match("URL(#x)", style.get("url-function") as RegExp);
+  assert.match("JaVaScRiPt:alert(1)", injection.get("javascript-scheme") as RegExp);
+  assert.match("<SCRIPT>x</SCRIPT>", injection.get("script-tag") as RegExp);
+  assert.match("1 UNION SELECT", injection.get("sql-metacharacter") as RegExp);
 });
 
 test("suite-owned ceilings and minimums are frozen and sane", () => {
