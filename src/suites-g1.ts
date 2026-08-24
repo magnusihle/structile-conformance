@@ -1,14 +1,15 @@
 /**
  * G1 protected suites, ported from the superseded `g1/protected-suites` branch onto the
  * hardened `g1-support.ts` shared module. Suites are appended here in re-cut order, one
- * per PR: DS-001 (design-system), then SPEC-001 (spec-fuzz), then ACT-001 (action-contract)
- * here; later suites (SPEC-002, CAP-001, PKG-001, HAR-004) are ported in their own PRs, not
- * batched into this file.
+ * per PR: DS-001 (design-system), then SPEC-001 (spec-fuzz), then ACT-001 (action-contract),
+ * then CAP-001 (capability-contract) here; later suites (SPEC-002, PKG-001, HAR-004) are
+ * ported in their own PRs, not batched into this file.
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { listFiles, readJson, writeJson } from "./io.ts";
+import { command, listFiles, readJson, writeJson } from "./io.ts";
 import { runnerRoot } from "./catalog.ts";
 import type { SuiteContext, SuiteResult } from "./suites.ts";
 import {
@@ -614,5 +615,147 @@ export async function actionContract({ candidate, artifactDir, options }: SuiteC
       rejections: rejected.length, transportHits: 0
     },
     artifactNames: ["action-contract.json", "execution-gate.json"]
+  };
+}
+
+/* ----------------------------------------------------------------- CAP-001 */
+
+interface AdapterVerdict { case: string; accepted: boolean; code: string | null }
+
+/** Prefer the prebuilt adapter; fall back to compiling from the same source. */
+function goAdapterCommand(root: string): readonly string[] {
+  const override = process.env.STRUCTILE_GO_ADAPTER;
+  if (override) return [override];
+  for (const candidate of ["/usr/local/bin/capability-adapter-go", resolve(root, "fixtures/capability/adapters/go/capability-adapter-go")]) {
+    if (existsSync(candidate)) return [candidate];
+  }
+  return ["go", "run", resolve(root, "fixtures/capability/adapters/go/adapter.go")];
+}
+
+export async function capabilityContract({ candidate, artifactDir, options }: SuiteContext): Promise<SuiteResult> {
+  const requested = String(options["reference-adapters"] ?? "").split(",").filter(Boolean).sort();
+  assert.deepEqual(requested, ["go", "node", "python"], "CAP-001 requires the node, python and go reference adapters");
+  assert.equal(options["negative-corpus"], "protected", "CAP-001 requires the protected negative corpus");
+
+  const sdk = await buildAndImport(candidate, "@structile/capability-sdk", "packages/capability-sdk");
+  requireExports(sdk, [
+    "CAPABILITY_PROTOCOL_VERSION", "SUPPORTED_PROTOCOL_VERSIONS", "negotiateProtocolVersion",
+    "validateCapabilityManifest", "CapabilityErrorCode", "CapabilityContractError"
+  ], "@structile/capability-sdk");
+
+  // The published contract is the only input the adapters get. If a language cannot
+  // implement the protocol from it, ARC-006 is not satisfied.
+  const contract = {
+    supportedMajors: [...sdk.SUPPORTED_PROTOCOL_VERSIONS].map((version: AnyRecord) => Number(version.major)),
+    errorCodes: Object.values(sdk.CapabilityErrorCode as Record<string, string>).sort(),
+    requiredManifestKeys: ["contractVersion", "resources", "fields", "metrics", "filters",
+      "relationships", "queries", "exports", "actions", "signature"],
+    audience: "structile-control-plane"
+  };
+  const root = runnerRoot();
+  const workDir = resolve(artifactDir, "capability");
+  const contractPath = resolve(workDir, "contract.json");
+  const corpusPath = resolve(root, "fixtures/capability/corpus.json");
+  await writeJson(contractPath, contract);
+  const corpus: AnyRecord[] = (await readJson(corpusPath)).cases;
+  assert.ok(corpus.length >= 10, "protected negative corpus must be non-trivial");
+
+  const adapters: Record<string, readonly string[]> = {
+    node: [process.execPath, resolve(root, "fixtures/capability/adapters/node/adapter.ts")],
+    python: ["python3", resolve(root, "fixtures/capability/adapters/python/adapter.py")],
+    // Prebuilt into the runner image from the same pinned source, so the 190 MB Go
+    // toolchain never ships. Falls back to `go run` when the binary is absent, so the
+    // suite stays runnable on a developer machine.
+    go: goAdapterCommand(root)
+  };
+  const verdicts: Record<string, AdapterVerdict[]> = {};
+  for (const [language, argv] of Object.entries(adapters)) {
+    const [program, ...args] = argv;
+    const result = await command(program as string, [...args, contractPath, corpusPath], {
+      cwd: workDir, timeout: 600_000,
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? workDir, TMPDIR: process.env.TMPDIR ?? workDir,
+             GOCACHE: resolve(workDir, "gocache"), GOFLAGS: "-mod=mod" }
+    });
+    verdicts[language] = JSON.parse(result.stdout) as AdapterVerdict[];
+  }
+
+  // --- every adapter must agree, case for case ---
+  const reference = verdicts.node as AdapterVerdict[];
+  assert.equal(reference.length, corpus.length, "node adapter must answer every case");
+  const disagreements: Array<{ case: string; language: string; expected: AdapterVerdict; actual: AdapterVerdict }> = [];
+  for (const language of ["python", "go"]) {
+    const rows = verdicts[language] as AdapterVerdict[];
+    assert.equal(rows.length, corpus.length, `${language} adapter must answer every case`);
+    for (const [index, expected] of reference.entries()) {
+      const actual = rows[index] as AdapterVerdict;
+      if (actual.case !== expected.case || actual.accepted !== expected.accepted || actual.code !== expected.code) {
+        disagreements.push({ case: expected.case, language, expected, actual });
+      }
+    }
+  }
+  assert.deepEqual(disagreements, [], "ARC-006: all reference adapters must decide identically");
+
+  // --- the corpus expectations themselves must hold, and negatives must fail closed ---
+  const mismatches: Array<{ case: string; expected: AnyRecord; actual: AdapterVerdict }> = [];
+  for (const [index, item] of corpus.entries()) {
+    const actual = reference[index] as AdapterVerdict;
+    if (actual.accepted !== Boolean(item.expectAccepted) || (item.expectCode ?? null) !== actual.code) {
+      mismatches.push({ case: String(item.name), expected: item, actual });
+    }
+  }
+  assert.deepEqual(mismatches, [], "reference adapters must match the protected expectations");
+  const negatives = corpus.filter((item) => !item.expectAccepted);
+  assert.ok(negatives.length >= 6, "negative corpus must cover malformed, unsigned, expired, wrong-audience and version cases");
+  for (const required of ["UNSUPPORTED_CONTRACT_VERSION", "MALFORMED_MANIFEST", "UNSIGNED_MANIFEST", "UNAUTHORIZED_CAPABILITY"]) {
+    assert.ok(negatives.some((item) => item.expectCode === required), `negative corpus must exercise ${required}`);
+    assert.ok(contract.errorCodes.includes(required), `CAP-004: ${required} must be a published stable code`);
+  }
+
+  // --- the candidate's own SDK must agree with the language-neutral contract ---
+  const sdkRejections: Array<{ label: string; rejected: true; error: string }> = [];
+  const validManifest = (corpus.find((item) => item.kind === "manifest" && item.expectAccepted) as AnyRecord).payload;
+  sdkRejections.push(await assertDiscriminates(
+    () => sdk.negotiateProtocolVersion([{ major: sdk.CAPABILITY_PROTOCOL_VERSION.major, minor: 0 }]),
+    () => sdk.negotiateProtocolVersion([{ major: 999, minor: 0 }]),
+    "CapabilityContractError", "negotiate:unsupported"));
+  sdkRejections.push(await assertDiscriminates(
+    () => sdk.validateCapabilityManifest(validManifest),
+    () => sdk.validateCapabilityManifest({}),
+    "CapabilityContractError", "manifest:malformed"));
+  for (const item of corpus) {
+    if (item.kind !== "manifest") continue;
+    if (item.expectAccepted) sdk.validateCapabilityManifest(item.payload);
+    else await assertRejects(() => sdk.validateCapabilityManifest(item.payload), "CapabilityContractError", `sdk:${item.name}`);
+  }
+
+  // --- no browser or database shortcut may exist (ARC-006) ---
+  const sdkFiles = (await listFiles(resolve(candidate, "packages/capability-sdk"))).filter((path) => /^src\/.+\.ts$/.test(path));
+  const shortcuts: Array<{ path: string; pattern: string }> = [];
+  for (const path of sdkFiles) {
+    const source = await readFile(resolve(candidate, "packages/capability-sdk", path), "utf8");
+    for (const pattern of [/postgres(?:ql)?:\/\//i, /from\s+["']pg["']/, /new\s+Client\s*\(/, /document\./, /window\./]) {
+      if (pattern.test(source)) shortcuts.push({ path, pattern: String(pattern) });
+    }
+  }
+  assert.deepEqual(shortcuts, [], "the capability SDK must not reach a database or the DOM directly");
+  assertPrototypeIntact();
+
+  await writeJson(resolve(artifactDir, "adapter-matrix.json"), {
+    adapters: Object.keys(adapters).sort(), cases: corpus.length,
+    disagreements, expectationMismatches: mismatches,
+    contract: { supportedMajors: contract.supportedMajors, errorCodes: contract.errorCodes }
+  });
+  await writeJson(resolve(artifactDir, "protocol-transcripts-redacted.json"), {
+    note: "decisions only; no payload bodies, credentials or customer values are recorded",
+    transcripts: reference.map((row) => ({ case: row.case, accepted: row.accepted, code: row.code })),
+    sdkRejections: sdkRejections.map((row) => ({ label: row.label, rejected: row.rejected }))
+  });
+
+  return {
+    measurements: {
+      adapters: 3, cases: corpus.length, disagreements: 0, expectationMismatches: 0,
+      negativeCases: negatives.length, databaseOrDomShortcuts: 0
+    },
+    artifactNames: ["adapter-matrix.json", "protocol-transcripts-redacted.json"]
   };
 }
