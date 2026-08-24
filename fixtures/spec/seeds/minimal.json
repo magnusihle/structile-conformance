@@ -1,0 +1,24 @@
+{
+  "specVersion": {
+    "major": 1,
+    "minor": 0
+  },
+  "id": "app.minimal",
+  "title": "Minimal",
+  "pages": [
+    {
+      "id": "home",
+      "path": "/",
+      "nodes": [
+        {
+          "componentId": "core.kpi",
+          "props": {
+            "label": "Total",
+            "metric": "orders"
+          },
+          "slots": {}
+        }
+      ]
+    }
+  ]
+}

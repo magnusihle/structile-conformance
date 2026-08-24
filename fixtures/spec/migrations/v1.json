@@ -1,0 +1,31 @@
+{
+  "specVersion": {
+    "major": 1,
+    "minor": 0
+  },
+  "id": "app.migration",
+  "title": "Migration Corpus",
+  "pages": [
+    {
+      "id": "home",
+      "path": "/",
+      "nodes": [
+        {
+          "componentId": "core.kpi",
+          "props": {
+            "label": "Total",
+            "metric": "orders"
+          },
+          "slots": {}
+        },
+        {
+          "componentId": "core.table",
+          "props": {
+            "title": "Rows"
+          },
+          "slots": {}
+        }
+      ]
+    }
+  ]
+}
