@@ -1,0 +1,39 @@
+{
+  "specVersion": {
+    "major": 1,
+    "minor": 0
+  },
+  "id": "app.nested",
+  "title": "Nested",
+  "pages": [
+    {
+      "id": "home",
+      "path": "/",
+      "nodes": [
+        {
+          "componentId": "core.stack",
+          "props": {},
+          "slots": {
+            "content": [
+              {
+                "componentId": "core.kpi",
+                "props": {
+                  "label": "A",
+                  "metric": "m1"
+                },
+                "slots": {}
+              },
+              {
+                "componentId": "core.table",
+                "props": {
+                  "title": "Rows"
+                },
+                "slots": {}
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
