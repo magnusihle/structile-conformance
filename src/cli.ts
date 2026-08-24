@@ -71,7 +71,11 @@ async function verifyEvidence(path: string, rawOptions: SuiteOptions): Promise<v
   const catalogs = await loadDefaultCatalogs();
   const evidence = await readJson(resolve(path));
   const measurements = (evidence as { measurements?: { localUnsigned?: unknown } }).measurements;
-  if (measurements?.localUnsigned === true && rawOptions["allow-unsigned"] !== true) {
+  const localUnsigned = measurements?.localUnsigned;
+  if (localUnsigned !== undefined && typeof localUnsigned !== "boolean") {
+    throw new Error("malformed evidence: measurements.localUnsigned must be a boolean; failing closed");
+  }
+  if (localUnsigned === true && rawOptions["allow-unsigned"] !== true) {
     throw new Error("localUnsigned evidence is never authoritative and cannot support any requirement or gate claim (DEL-004); pass --allow-unsigned for informational validation only");
   }
   const result = validateEvidence(evidence, catalogs.requirements, catalogs.tests, {

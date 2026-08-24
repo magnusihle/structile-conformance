@@ -72,6 +72,23 @@ test("run-subset executes exactly the named suites, all unsigned", async () => {
   assert.equal(result.code, summary.exitCode);
 });
 
+test("verify-evidence fails closed on non-boolean localUnsigned, even with --allow-unsigned", async () => {
+  const example = JSON.parse(await readFile(resolve(root, "examples/evidence.example.json"), "utf8")) as {
+    measurements: Record<string, unknown>;
+  };
+  const dir = await mkdtemp(join(tmpdir(), "unsigned-evidence-type-"));
+  for (const [label, value] of [["string", "true"], ["number", 1]] as const) {
+    example.measurements.localUnsigned = value;
+    const path = join(dir, `evidence-${label}.json`);
+    await writeFile(path, JSON.stringify(example));
+    const rejected = await runCli(["verify-evidence", path]);
+    assert.equal(rejected.code, 2, label);
+    assert.match(rejected.stderr, /must be a boolean/);
+    const stillRejected = await runCli(["verify-evidence", path, "--allow-unsigned"]);
+    assert.equal(stillRejected.code, 2, `${label} with --allow-unsigned`);
+  }
+});
+
 test("verify-evidence rejects localUnsigned envelopes as authority, allows informational validation", async () => {
   const example = JSON.parse(await readFile(resolve(root, "examples/evidence.example.json"), "utf8")) as {
     measurements: Record<string, unknown>;
