@@ -1,18 +1,19 @@
 /**
  * G1 protected suites, ported from the superseded `g1/protected-suites` branch onto the
  * hardened `g1-support.ts` shared module. Suites are appended here in re-cut order, one
- * per PR: DS-001 (design-system) lands first; later suites (ACT-001, SPEC-001, SPEC-002,
- * CAP-001, PKG-001, HAR-004) are ported in their own PRs, not batched into this file.
+ * per PR: DS-001 (design-system) landed first; SPEC-001 (spec-fuzz) lands here; later
+ * suites (ACT-001, SPEC-002, CAP-001, PKG-001, HAR-004) are ported in their own PRs, not
+ * batched into this file.
  */
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { readJson, writeJson } from "./io.ts";
+import { listFiles, readJson, writeJson } from "./io.ts";
 import { runnerRoot } from "./catalog.ts";
 import type { SuiteContext, SuiteResult } from "./suites.ts";
 import {
-  CONTRAST_MINIMUM, FORBIDDEN_STYLE_PATTERNS,
-  assertDiscriminates, assertPrototypeIntact, buildAndImport, contrastRatio,
-  requireExports, type AnyRecord
+  CONTRAST_MINIMUM, FORBIDDEN_STYLE_PATTERNS, INJECTION_PATTERNS, LIMIT_CEILINGS, POLLUTION_KEYS,
+  assertDiscriminates, assertPrototypeIntact, buildAndImport, collectPaths, contrastRatio,
+  createRandom, requireExports, resolveParent, type AnyRecord
 } from "./g1-support.ts";
 
 const TOKEN_CATEGORIES = ["color", "typography", "spacing", "elevation", "motion", "density"] as const;
@@ -244,5 +245,261 @@ export async function designSystem({ candidate, artifactDir, options }: SuiteCon
       deniedTokensTotal: notOverridable.length, deniedTokensProbed: probedTokens.length
     },
     artifactNames: ["token-lint.json", "catalog-report.json", "theme-matrix.json"]
+  };
+}
+
+/* ---------------------------------------------------------------- SPEC-001 */
+
+export async function specFuzz({ candidate, artifactDir, options }: SuiteContext): Promise<SuiteResult> {
+  assert.equal(options.seeds, "protected", "SPEC-001 requires the protected seed corpus");
+  const iterations = Number(options.iterations ?? 100000);
+  assert.ok(Number.isSafeInteger(iterations) && iterations > 0, "--iterations must be a positive integer");
+
+  const spec = await buildAndImport(candidate, "@structile/spec", "packages/spec");
+  requireExports(spec, [
+    "SPEC_SCHEMA_VERSION", "SUPPORTED_SPEC_MAJORS", "negotiateSpecVersion",
+    "compatibilityMatrix", "validateSpecification", "SpecificationError", "LIMITS"
+  ], "@structile/spec");
+
+  const root = runnerRoot();
+  const catalog = await readJson(resolve(root, "fixtures/spec/catalog.json"));
+  const seedNames = (await listFiles(resolve(root, "fixtures/spec/seeds"))).filter((n) => n.endsWith(".json"));
+  assert.ok(seedNames.length >= 3, "protected seed corpus must be non-trivial");
+
+  // --- valid seeds round-trip with normalized equality ---
+  const seeds: AnyRecord[] = [];
+  for (const name of seedNames) {
+    const seed = await readJson(resolve(root, "fixtures/spec/seeds", name));
+    const first = spec.validateSpecification(seed, { catalog });
+    const second = spec.validateSpecification(JSON.parse(JSON.stringify(first)), { catalog });
+    assert.deepEqual(second, first, `${name} must round-trip without semantic drift`);
+    seeds.push(seed);
+  }
+
+  // --- N/N-1 surface is declared and fails closed on an unsupported major ---
+  const matrix = spec.compatibilityMatrix();
+  assert.ok(Array.isArray(spec.SUPPORTED_SPEC_MAJORS) && spec.SUPPORTED_SPEC_MAJORS.length >= 1);
+  assert.equal(matrix.current, spec.SPEC_SCHEMA_VERSION.major, "matrix must declare the current major");
+  const rejected: Array<{ label: string; rejected: true; error: string }> = [];
+  rejected.push(await assertDiscriminates(
+    () => spec.negotiateSpecVersion({ major: spec.SPEC_SCHEMA_VERSION.major, minor: 0 }),
+    () => spec.negotiateSpecVersion({ major: 999, minor: 0 }),
+    "SpecificationError", "version:unsupported-major"));
+
+  // --- protected negative corpus, one payload class at a time ---
+  const base = seeds[0] as AnyRecord;
+  const coverage: Record<string, number> = {};
+  const record = (cls: string): void => { coverage[cls] = (coverage[cls] ?? 0) + 1; };
+
+  for (const key of POLLUTION_KEYS) {
+    // Build from JSON text: `obj["__proto__"] = x` only sets the prototype, whereas
+    // JSON.parse creates a real own property. Specifications arrive as JSON, so the
+    // text form is the threat model that matters.
+    const payload = JSON.parse(
+      JSON.stringify(base).replace(/^\{/, `{${JSON.stringify(key)}:{"polluted":true},`)
+    ) as AnyRecord;
+    assert.ok(Object.prototype.hasOwnProperty.call(payload, key), `${key} must be an own property for this probe to be meaningful`);
+    rejected.push(await assertDiscriminates(
+      () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+      () => spec.validateSpecification(payload, { catalog }),
+      "SpecificationError", `pollution:${key}`));
+    record("prototype-pollution");
+  }
+  // A nested pollution attempt must be refused *on its own merits*. Injecting into an
+  // otherwise-valid document — and asserting the un-poisoned control still validates —
+  // stops an unrelated violation from masking the probe.
+  const nestedText = JSON.stringify(base).replace(/"pages"\s*:\s*\[\s*\{/, '"pages":[{"__proto__":{"polluted":true},');
+  assert.notEqual(nestedText, JSON.stringify(base), "nested pollution probe failed to inject");
+  const nested = JSON.parse(nestedText) as AnyRecord;
+  assert.ok(Object.prototype.hasOwnProperty.call(nested.pages[0], "__proto__"), "nested __proto__ must be an own property");
+  const nestedControl = JSON.parse(JSON.stringify(nested)) as AnyRecord;
+  delete nestedControl.pages[0]["__proto__"];
+  rejected.push(await assertDiscriminates(
+    () => spec.validateSpecification(nestedControl, { catalog }),
+    () => spec.validateSpecification(nested, { catalog }),
+    "SpecificationError", "pollution:nested"));
+  record("prototype-pollution");
+
+  for (const [name, ] of INJECTION_PATTERNS) {
+    const payload: Record<string, string> = {
+      "script-tag": "<script>x</script>", markup: "<b>x</b>", "javascript-scheme": "javascript:x",
+      "data-scheme": "data:text/html,x", "event-handler": "onload=x", "css-expression": "expression(1)",
+      "url-function": "url(x)", template: "{{x}}", "sql-metacharacter": "1; DROP TABLE t --",
+      "absolute-url": "https://example.invalid/x", "scheme-relative-url": "//example.invalid/x"
+    };
+    const poisoned = JSON.parse(JSON.stringify(base)) as AnyRecord;
+    poisoned.title = payload[name];
+    rejected.push(await assertDiscriminates(
+      () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+      () => spec.validateSpecification(poisoned, { catalog }),
+      "SpecificationError", `injection:${name}`));
+    record("injection");
+  }
+
+  // Unknown catalog identity and unknown props.
+  const unknownComponent = JSON.parse(JSON.stringify(base)) as AnyRecord;
+  unknownComponent.pages[0].nodes[0].componentId = "not.registered";
+  rejected.push(await assertDiscriminates(
+    () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+    () => spec.validateSpecification(unknownComponent, { catalog }),
+    "SpecificationError", "catalog:unknown-component"));
+  record("catalog-escape");
+  const unknownProp = JSON.parse(JSON.stringify(base)) as AnyRecord;
+  unknownProp.pages[0].nodes[0].props.__unregistered = 1;
+  rejected.push(await assertDiscriminates(
+    () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+    () => spec.validateSpecification(unknownProp, { catalog }),
+    "SpecificationError", "catalog:unknown-prop"));
+  record("catalog-escape");
+
+  // Limits: depth, nodes, bytes, cost.
+  const limits = spec.LIMITS as Record<string, number>;
+  for (const limit of ["maxDepth", "maxNodes", "maxBytes", "maxCost", "maxStructuralDepth"]) {
+    assert.equal(typeof limits[limit], "number", `LIMITS.${limit} must be declared`);
+    const ceiling = LIMIT_CEILINGS[limit] as number;
+    assert.ok((limits[limit] as number) > 0, `LIMITS.${limit} must be positive`);
+    assert.ok((limits[limit] as number) <= ceiling,
+      `LIMITS.${limit} is ${limits[limit]}, above the protected ceiling of ${ceiling}. ` +
+      "A candidate may declare stricter limits than the ceiling, never looser.");
+  }
+  let deep: AnyRecord = { componentId: (base as AnyRecord).pages[0].nodes[0].componentId, props: {}, slots: {} };
+  for (let index = 0; index <= (limits.maxDepth as number) + 1; index += 1) {
+    deep = { componentId: (base as AnyRecord).pages[0].nodes[0].componentId, props: {}, slots: { content: [deep] } };
+  }
+  const tooDeep = JSON.parse(JSON.stringify(base)) as AnyRecord;
+  tooDeep.pages[0].nodes = [deep];
+  rejected.push(await assertDiscriminates(
+    () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+    () => spec.validateSpecification(tooDeep, { catalog }),
+    "SpecificationError", "limit:depth"));
+  record("limit");
+  // Structural depth must be bounded across the WHOLE document, not only the node tree.
+  // Deep nesting inside props is an unbounded-recursion vector for any renderer that
+  // walks the spec, and the node-depth guard alone does not see it.
+  // Probe just past the candidate's DECLARED structural bound rather than a guessed
+  // multiple of maxDepth: a candidate that declares a large bound would otherwise sail
+  // past a fixed probe. The ceiling above is what stops the declaration being absurd.
+  const structuralBound = limits.maxStructuralDepth as number;
+  assert.ok(structuralBound > (limits.maxDepth as number) * 3,
+    `LIMITS.maxStructuralDepth (${structuralBound}) must exceed the depth a legal node tree reaches, ` +
+    `or it shadows maxDepth and the node-tree limit can never be observed`);
+  const deepValue = ((): AnyRecord => {
+    let node: AnyRecord = {};
+    for (let level = 0; level < structuralBound + 2; level += 1) node = { child: node };
+    return node;
+  })();
+  const deepProps = JSON.parse(JSON.stringify(base)) as AnyRecord;
+  deepProps.pages[0].nodes[0].props.label = deepValue;
+  rejected.push(await assertDiscriminates(
+    () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+    () => spec.validateSpecification(deepProps, { catalog }),
+    "SpecificationError", "limit:structural-depth"));
+  record("limit");
+
+  // Byte ceiling (SPEC-009): a spec under every other limit but over maxBytes.
+  const tooBig = JSON.parse(JSON.stringify(base)) as AnyRecord;
+  tooBig.description = "a".repeat((limits.maxBytes as number) + 1024);
+  rejected.push(await assertDiscriminates(
+    () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+    () => spec.validateSpecification(tooBig, { catalog }),
+    "SpecificationError", "limit:bytes"));
+  record("limit");
+
+  // Non-data values cannot appear in a stored specification (SPEC-001).
+  for (const [label, value] of [["function", () => 1], ["symbol", Symbol("x")], ["bigint", BigInt(1)]] as Array<[string, unknown]>) {
+    const nonData = JSON.parse(JSON.stringify(base)) as AnyRecord;
+    nonData.title = value;
+    rejected.push(await assertDiscriminates(
+      () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+      () => spec.validateSpecification(nonData, { catalog }),
+      "SpecificationError", `non-data:${label}`));
+    record("non-data");
+  }
+
+  const tooMany = JSON.parse(JSON.stringify(base)) as AnyRecord;
+  tooMany.pages[0].nodes = Array.from({ length: (limits.maxNodes as number) + 1 }, () => JSON.parse(JSON.stringify((base as AnyRecord).pages[0].nodes[0])));
+  rejected.push(await assertDiscriminates(
+    () => spec.validateSpecification(JSON.parse(JSON.stringify(base)), { catalog }),
+    () => spec.validateSpecification(tooMany, { catalog }),
+    "SpecificationError", "limit:nodes"));
+  record("limit");
+
+  // --- deterministic property fuzzing ---
+  //
+  // Pollution hardening (ported from `g1-support.ts` after this suite's salvage
+  // ancestor was written): `resolveParent` now refuses any path that traverses or
+  // targets a POLLUTION_KEYS segment, so it can never hand back the live
+  // Object.prototype as a mutation target. That refusal is inert here rather than a
+  // functional change: `document` is rebuilt fresh from a clean protected seed at the
+  // top of every iteration, and both `paths` and `target` are captured from that clean
+  // document BEFORE the iteration's single mutation is applied — so a path already
+  // carrying a pollution-key segment can never be offered to resolveParent in the
+  // first place. The "pollute" mutation reaches its target the same way every other
+  // mutation does (an ordinary, pre-mutation own-property path) and only afterwards
+  // assigns a payload literal — `{"__proto__": {...}}` as a JSON-parsed OWN property,
+  // not a live-prototype write — as that target's new value. No payload synthesis
+  // workaround was needed; this is confirmed empirically by qualification (see
+  // docs/qualification/SPEC-001.md), where `assertPrototypeIntact()` below passes on
+  // every one of the iterations exercising the "pollute" mutation.
+  const seedValue = Number(options.seed ?? 20260823);
+  const random = createRandom(seedValue);
+  const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+  const mutations = ["drop-key", "retype", "inject-string", "pollute", "explode-array", "null-out", "deep-nest"] as const;
+  const injections = ["<script>x</script>", "javascript:x", "{{x}}", "' OR 1=1 --", "url(x)", "//evil.invalid"];
+  const mutationCounts: Record<string, number> = {};
+  const depthHistogram: Record<string, number> = {};
+  let accepted = 0;
+  let refused = 0;
+  for (let index = 0; index < iterations; index += 1) {
+    const document = JSON.parse(JSON.stringify(pick(seeds))) as AnyRecord;
+    const mutation = pick(mutations);
+    mutationCounts[mutation] = (mutationCounts[mutation] ?? 0) + 1;
+    // Mutate anywhere in the tree, not just the top level; a top-level-only fuzzer
+    // never reaches node props, slots or nested pages.
+    const paths = collectPaths(document);
+    const path = paths.length > 0 ? pick(paths) : [];
+    depthHistogram[String(path.length)] = (depthHistogram[String(path.length)] ?? 0) + 1;
+    const target = resolveParent(document, path);
+    if (target) {
+      const { parent, key } = target;
+      if (mutation === "drop-key") delete parent[key];
+      else if (mutation === "retype") parent[key] = random() < 0.5 ? 42 : [];
+      else if (mutation === "inject-string") parent[key] = pick(injections);
+      else if (mutation === "pollute") parent[key] = JSON.parse(`{${JSON.stringify(pick(POLLUTION_KEYS))}:{"polluted":true}}`);
+      else if (mutation === "explode-array") parent[key] = Array.from({ length: 64 }, () => ({}));
+      else if (mutation === "deep-nest") {
+        let nested: AnyRecord = {};
+        for (let depth = 0; depth < 40; depth += 1) nested = { child: nested };
+        parent[key] = nested;
+      } else parent[key] = null;
+    }
+    try {
+      spec.validateSpecification(document, { catalog });
+      accepted += 1;
+    } catch (error) {
+      const failure = error as { name?: string };
+      assert.equal(failure.name, "SpecificationError",
+        `fuzz iteration ${index} (seed ${seedValue}, ${mutation}) threw ${failure.name} instead of SpecificationError`);
+      refused += 1;
+    }
+    assertPrototypeIntact();
+  }
+
+  const missing = ["prototype-pollution", "injection", "catalog-escape", "limit", "non-data"].filter((cls) => !coverage[cls]);
+  assert.deepEqual(missing, [], "every rejection class must be exercised");
+
+  await writeJson(resolve(artifactDir, "spec-fuzz.json"), {
+    iterations, seed: seedValue, seeds: seedNames, accepted, refused,
+    schemaVersion: spec.SPEC_SCHEMA_VERSION, supportedMajors: spec.SUPPORTED_SPEC_MAJORS, compatibilityMatrix: matrix
+  });
+  await writeJson(resolve(artifactDir, "rejected-corpus.json"), { rejections: rejected });
+  await writeJson(resolve(artifactDir, "coverage.json"), { classes: coverage, limits, ceilings: LIMIT_CEILINGS });
+
+  return {
+    measurements: {
+      iterations, seed: seedValue, deterministicRejections: rejected.length,
+      fuzzAccepted: accepted, fuzzRefused: refused, prototypePolluted: false
+    },
+    artifactNames: ["spec-fuzz.json", "rejected-corpus.json", "coverage.json"]
   };
 }
