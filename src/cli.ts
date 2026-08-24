@@ -9,7 +9,7 @@ import { loadDefaultCatalogs, validateEvidence } from "../tooling/validate-plann
 import { readJson } from "./io.ts";
 
 function usage(): void {
-  process.stderr.write("Usage: platform-conformance list | run <suite> [--candidate PATH] [--evidence-dir PATH] | verify-evidence <path> [--candidate-sha SHA] [--runner-digest DIGEST]\n");
+  process.stderr.write("Usage: platform-conformance list | run <suite> [--unsigned] [--candidate PATH] [--evidence-dir PATH] | run-subset <suite,suite,...> [--candidate PATH] [--evidence-dir PATH] | verify-evidence <path> [--allow-unsigned] [--candidate-sha SHA] [--runner-digest DIGEST]\n");
 }
 
 function parseOptions(args: string[]): SuiteOptions {
@@ -25,13 +25,14 @@ function parseOptions(args: string[]): SuiteOptions {
   return options;
 }
 
-async function runSuite(slug: string, rawOptions: SuiteOptions): Promise<number> {
+async function runSuite(slug: string, rawOptions: SuiteOptions, forceUnsigned = false): Promise<number> {
   const test = await resolveSuite(slug);
   const suite = suites[slug as SuiteSlug];
   if (!test || !suite) throw new Error(`unknown or unimplemented suite ${slug}`);
+  const unsigned = forceUnsigned || rawOptions.unsigned === true;
   const candidate = resolve(String(rawOptions.candidate ?? process.cwd()));
   const identity = await candidateIdentity(candidate);
-  if (identity.dirty) throw new Error("candidate must be a clean Git commit before evidence can be emitted");
+  if (identity.dirty && !unsigned) throw new Error("candidate must be a clean Git commit before evidence can be emitted; --unsigned permits dirty local iteration without authority");
   const outputRoot = resolve(String(rawOptions["evidence-dir"] ?? resolve(candidate, "evidence")));
   const runDirectory = resolve(outputRoot, `${test.id}-${identity.commitSha.slice(0, 12)}-${Date.now()}`);
   const artifactDir = resolve(runDirectory, "artifacts");
@@ -57,7 +58,8 @@ async function runSuite(slug: string, rawOptions: SuiteOptions): Promise<number>
   const evidence = await buildEvidence({
     test, candidate, status, exitCode, startedAt, finishedAt,
     measurements: result.measurements, artifactDir, artifactNames: result.artifactNames,
-    configDigest: configDigest(slug, rawOptions)
+    configDigest: configDigest(slug, rawOptions),
+    unsigned
   });
   const evidencePath = resolve(runDirectory, "evidence.json");
   await writeEvidence(evidencePath, evidence);
@@ -68,6 +70,14 @@ async function runSuite(slug: string, rawOptions: SuiteOptions): Promise<number>
 async function verifyEvidence(path: string, rawOptions: SuiteOptions): Promise<void> {
   const catalogs = await loadDefaultCatalogs();
   const evidence = await readJson(resolve(path));
+  const measurements = (evidence as { measurements?: { localUnsigned?: unknown } }).measurements;
+  const localUnsigned = measurements?.localUnsigned;
+  if (localUnsigned !== undefined && typeof localUnsigned !== "boolean") {
+    throw new Error("malformed evidence: measurements.localUnsigned must be a boolean; failing closed");
+  }
+  if (localUnsigned === true && rawOptions["allow-unsigned"] !== true) {
+    throw new Error("localUnsigned evidence is never authoritative and cannot support any requirement or gate claim (DEL-004); pass --allow-unsigned for informational validation only");
+  }
   const result = validateEvidence(evidence, catalogs.requirements, catalogs.tests, {
     candidateSha: rawOptions["candidate-sha"],
     runnerDigest: rawOptions["runner-digest"]
@@ -83,6 +93,16 @@ async function main(): Promise<void> {
   }
   if (command === "run" && subject) {
     process.exitCode = await runSuite(subject, parseOptions(rest));
+    return;
+  }
+  if (command === "run-subset" && subject) {
+    const slugs = subject.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+    if (slugs.length === 0) throw new Error("run-subset requires at least one suite slug");
+    const options = parseOptions(rest);
+    let worst = 0;
+    for (const slug of slugs) worst = Math.max(worst, await runSuite(slug, options, true));
+    process.stdout.write(`${JSON.stringify({ subset: slugs, localUnsigned: true, exitCode: worst })}\n`);
+    process.exitCode = worst;
     return;
   }
   if (command === "verify-evidence" && subject) {

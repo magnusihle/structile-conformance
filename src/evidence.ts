@@ -20,6 +20,7 @@ interface BuildEvidenceInput {
   artifactDir: string;
   artifactNames: string[];
   configDigest: string;
+  unsigned?: boolean;
 }
 
 function normalizeRepository(remote: string): string {
@@ -55,7 +56,7 @@ export async function runnerDigests(): Promise<{ imageDigest: string; testSource
   };
 }
 
-export async function buildEvidence({ test, candidate, status, exitCode, startedAt, finishedAt, measurements, artifactDir, artifactNames, configDigest }: BuildEvidenceInput): Promise<any> {
+export async function buildEvidence({ test, candidate, status, exitCode, startedAt, finishedAt, measurements, artifactDir, artifactNames, configDigest, unsigned = false }: BuildEvidenceInput): Promise<any> {
   const identity = await candidateIdentity(candidate);
   const runner = await runnerDigests();
   const artifacts: Array<{ name: string; sha256: string }> = [];
@@ -83,7 +84,7 @@ export async function buildEvidence({ test, candidate, status, exitCode, started
     startedAt,
     finishedAt,
     exitCode,
-    measurements: { ...measurements, localUnsigned: runner.localUnsigned },
+    measurements: { ...measurements, localUnsigned: runner.localUnsigned || unsigned },
     artifacts,
     provenance: {
       ciRunId: process.env.GITHUB_RUN_ID ?? `local-${process.pid}`,
