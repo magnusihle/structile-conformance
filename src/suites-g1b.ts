@@ -1,11 +1,10 @@
 /**
  * G1 protected suites, re-cut wave 2. Ported from the superseded `g1/protected-suites`
  * branch onto the hardened `g1-support.ts` shared module, appended in re-cut order: HAR-004
- * (graphify-policy), then SPEC-002 (spec-migrations); PKG-001 (package-matrix) is ported
- * in its own later PR, not batched into this file.
+ * (graphify-policy), SPEC-002 (spec-migrations), then PKG-001 (package-matrix).
  */
 import assert from "node:assert/strict";
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { command, readJson, writeJson } from "./io.ts";
 import { runnerRoot } from "./catalog.ts";
@@ -244,5 +243,130 @@ export async function specMigrations({ candidate, artifactDir, options }: SuiteC
       roundtrips: roundtrips.length, rejections: rejected.length
     },
     artifactNames: ["migration-matrix.json", "roundtrip-diffs.json"]
+  };
+}
+
+/* ----------------------------------------------------------------- PKG-001 */
+
+/**
+ * Pinned versioned distribution (ARC-003/ARC-004), rewritten for the released-majors
+ * amendment (planning#1): the salvage suite at `origin/g1/protected-suites:src/suites-g1b.ts`
+ * L213-301 asserted unconditionally that the published compatibility matrix names two
+ * installable schema majors ("a single supported major cannot demonstrate N/N-1
+ * distribution"). That presupposes a released major 2, which does not exist. The amended
+ * catalog oracle (`verification/test-catalog.json`, PKG-001) reads: "every released
+ * supported schema major installs and runs (current only before a second major exists;
+ * current and N-1 thereafter)". The rewrite below branches on `previous`, exactly as
+ * SPEC-002 does: before a second major ships, the matrix must truthfully declare only the
+ * current major installable, and demanding a second would itself be the fabrication the
+ * amendment forbids; once a second major genuinely releases, both must be installable and
+ * the matrix must name them. Everything else -- exact-pinning, frozen-lockfile and
+ * provenance enforcement -- is unaffected by the amendment and is carried unchanged.
+ */
+export async function packageMatrix({ candidate, artifactDir, options }: SuiteContext): Promise<SuiteResult> {
+  assert.equal(options.schema, "released", "PKG-001 requires --schema released");
+  assert.ok(options["frozen-lockfile"] !== undefined, "PKG-001 requires --frozen-lockfile");
+
+  const boundaries = await readJson(resolve(candidate, "architecture/package-boundaries.json"));
+  const rootManifest = await readJson(resolve(candidate, "package.json"));
+  const lock = await readJson(resolve(candidate, "package-lock.json"));
+
+  const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+  const findings: AnyRecord[] = [];
+  const packages: AnyRecord[] = [];
+
+  // Every declared dependency, in every workspace, must be an exact version. A caret or
+  // tilde is exactly the mechanism by which a platform release reaches a deployed product.
+  const manifests: Array<[string, AnyRecord]> = [["package.json", rootManifest]];
+  for (const boundary of boundaries.packages as AnyRecord[]) {
+    manifests.push([`${String(boundary.path)}/package.json`, await readJson(resolve(candidate, String(boundary.path), "package.json"))]);
+  }
+  for (const [path, manifest] of manifests) {
+    for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+      for (const [name, range] of Object.entries((manifest[field] ?? {}) as Record<string, string>)) {
+        if (!EXACT.test(range)) findings.push({ path, field, name, range, issue: "not an exact version" });
+      }
+    }
+    if (path !== "package.json") {
+      if (manifest.private !== true) findings.push({ path, issue: "must stay private until a signed release publishes it" });
+      if (typeof manifest.version !== "string" || !EXACT.test(manifest.version)) {
+        findings.push({ path, issue: "package version must be exact semver" });
+      }
+      packages.push({ name: manifest.name, version: manifest.version, private: manifest.private === true });
+    }
+  }
+  assert.deepEqual(findings, [], "every dependency and package version must be exactly pinned");
+
+  // The lockfile must be complete and internally consistent with the manifests.
+  assert.ok(Number(lock.lockfileVersion) >= 3, "a modern lockfile is required");
+  assert.equal(lock.name, rootManifest.name);
+  const locked = (lock.packages ?? {}) as Record<string, AnyRecord>;
+  const unresolved = Object.entries(locked)
+    .filter(([path, entry]) => path.startsWith("node_modules/") && !entry.link && (!entry.version || !entry.resolved))
+    .map(([path]) => path);
+  assert.deepEqual(unresolved, [], "every locked dependency needs a resolved version");
+
+  // `npm ci` must succeed without mutating the lockfile: that is what "frozen" means.
+  const before = await readFile(resolve(candidate, "package-lock.json"), "utf8");
+  await command("npm", ["ci", "--ignore-scripts"], { cwd: candidate, timeout: 600_000 });
+  const after = await readFile(resolve(candidate, "package-lock.json"), "utf8");
+  assert.equal(after, before, "npm ci must not rewrite the lockfile");
+
+  // A product pins against the specification compatibility matrix, so it must be published
+  // and must name every genuinely released major -- never more, never fewer.
+  const spec = await buildAndImport(candidate, "@structile/spec", "packages/spec");
+  const matrix = spec.compatibilityMatrix() as AnyRecord;
+  const supported = [...(matrix.supported as number[])].sort((a, b) => b - a);
+  const current = supported[0] as number;
+  const previous = supported.length > 1 ? (supported[1] as number) : null;
+  assert.equal(matrix.current, spec.SPEC_SCHEMA_VERSION.major);
+  assert.equal(matrix.current, current, "the matrix must declare the current major");
+  assert.equal(matrix.previous, previous, "the matrix must declare the previous major honestly");
+
+  if (previous === null) {
+    // Nothing has released beyond the first major: only the current major may be declared
+    // installable. Requiring a second here would demand a fabricated schema major exactly
+    // as the amendment forbids.
+    assert.deepEqual(supported, [current],
+      "before a second schema major exists, the matrix may declare only the current major installable");
+  } else {
+    // A second major has genuinely released: both it and the current major must be
+    // installable, and the matrix must name both -- this is the N/N-1 distribution ARC-004
+    // requires once there is a previous major to distribute against.
+    assert.ok(supported.includes(current) && supported.includes(previous),
+      "PKG-001 requires both the current and previously released schema majors to be installable");
+  }
+
+  // Northstar consumes pinned releases; its lock contract must demand immutable digests.
+  const reference = process.env.STRUCTILE_NORTHSTAR_CHECKOUT;
+  assert.ok(reference, "STRUCTILE_NORTHSTAR_CHECKOUT must identify the consuming product");
+  const lockSchema = await readJson(resolve(reference, "bootstrap/release-lock.schema.json"));
+  const conformance = lockSchema.properties.conformance.properties;
+  assert.equal(conformance.runnerImageDigest.pattern, "^sha256:[a-f0-9]{64}$", "the runner must be pinned by digest");
+  assert.equal(conformance.testSourceDigest.pattern, "^sha256:[a-f0-9]{64}$");
+  assert.equal(lockSchema.properties.core.properties.release.pattern, "^v[0-9]+\\.[0-9]+\\.[0-9]+$");
+  const requiredPackages = await readJson(resolve(reference, "bootstrap/required-packages.json"));
+  const declared = new Set((boundaries.packages as AnyRecord[]).map((entry) => String(entry.name)));
+  const unknown = (requiredPackages.packages as string[]).filter((name) => !declared.has(name));
+  assert.deepEqual(unknown, [], "the product may only require declared platform packages");
+
+  const branch = previous === null ? "single-major-not-applicable" : "n-and-n-minus-one";
+  await writeJson(resolve(artifactDir, "package-matrix.json"), {
+    packages, lockfileVersion: lock.lockfileVersion, frozen: true,
+    supportedSchemaMajors: supported, current, previous, branch,
+    requiredByProduct: requiredPackages.packages
+  });
+  await writeJson(resolve(artifactDir, "provenance-report.json"), {
+    note: "signature and provenance verification is performed by the protected workflow against published artifacts",
+    releasePinning: { runnerImageDigest: "sha256", testSourceDigest: "sha256", corePackages: "exact semver" },
+    floatingRangeFindings: findings
+  });
+
+  return {
+    measurements: {
+      packages: packages.length, floatingRanges: 0, unresolvedLockEntries: 0,
+      lockfileRewritten: false, supportedSchemaMajors: supported.length, branch
+    },
+    artifactNames: ["package-matrix.json", "provenance-report.json"]
   };
 }

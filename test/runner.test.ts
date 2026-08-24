@@ -20,9 +20,9 @@ test("protected planning inputs match the approved bootstrap hashes", async () =
   }
 });
 
-test("runner exposes only the eleven CLI-backed G0/G1 suites", async () => {
-  assert.deepEqual(Object.keys(suiteIds), ["architecture-boundaries", "compose-smoke", "agent-adapters", "harness-policy", "open-source", "design-system", "spec-fuzz", "action-contract", "capability-contract", "graphify-policy", "spec-migrations"]);
-  const gates: Record<string, string> = { "design-system": "G1", "spec-fuzz": "G1", "action-contract": "G1", "capability-contract": "G1", "graphify-policy": "G1", "spec-migrations": "G1" };
+test("runner exposes only the twelve CLI-backed G0/G1 suites", async () => {
+  assert.deepEqual(Object.keys(suiteIds), ["architecture-boundaries", "compose-smoke", "agent-adapters", "harness-policy", "open-source", "design-system", "spec-fuzz", "action-contract", "capability-contract", "graphify-policy", "spec-migrations", "package-matrix"]);
+  const gates: Record<string, string> = { "design-system": "G1", "spec-fuzz": "G1", "action-contract": "G1", "capability-contract": "G1", "graphify-policy": "G1", "spec-migrations": "G1", "package-matrix": "G1" };
   for (const [slug, id] of Object.entries(suiteIds)) {
     const suite = await resolveSuite(slug);
     assert.ok(suite);
@@ -31,12 +31,12 @@ test("runner exposes only the eleven CLI-backed G0/G1 suites", async () => {
     assert.equal(typeof suites[slug as SuiteSlug], "function");
   }
   const { stdout } = await runFile(process.execPath, [resolve(root, "src/cli.ts"), "list"]);
-  assert.equal(JSON.parse(stdout).length, 11);
+  assert.equal(JSON.parse(stdout).length, 12);
 });
 
 test("unknown or not-yet-implemented suites fail closed with exit 2", async () => {
   await assert.rejects(
-    runFile(process.execPath, [resolve(root, "src/cli.ts"), "run", "package-matrix"]),
+    runFile(process.execPath, [resolve(root, "src/cli.ts"), "run", "accessibility"]),
     (error: unknown) => {
       const failure = error as { code?: number; stderr?: string };
       return failure.code === 2 && /unknown or unimplemented suite/.test(failure.stderr ?? "");
