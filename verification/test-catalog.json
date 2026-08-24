@@ -579,10 +579,10 @@
       "title": "Runner subset and unsigned-envelope authority rejection",
       "gate": "G1",
       "kind": "automated",
-      "command": "platform-conformance run self-check --subset named --unsigned",
-      "environment": "Pinned runner image; builder-equivalent credentials; no signing identity",
+      "command": "platform-conformance run self-check",
+      "environment": "Pinned runner image; the suite internally exercises subset runs with builder-equivalent credentials and no signing identity",
       "timeoutSeconds": 600,
-      "oracle": "A named subset executes exactly the requested tests; every emitted envelope carries localUnsigned true; the evidence gate rejects localUnsigned envelopes as authority for any requirement or gate claim.",
+      "oracle": "The suite's own envelope is signed and authoritative. Internally it invokes named-subset unsigned runs and asserts: the subset executes exactly the requested tests; every internally emitted envelope carries localUnsigned true; and the evidence gate rejects localUnsigned or malformed envelopes as authority for any requirement or gate claim.",
       "evidenceArtifacts": ["subset-run.json", "authority-rejection.json"],
       "independentRerun": true,
       "requirements": ["DEL-004"]
