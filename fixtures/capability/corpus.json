@@ -1,0 +1,242 @@
+{
+  "schemaVersion": "1.0.0",
+  "cases": [
+    {
+      "name": "manifest.valid",
+      "kind": "manifest",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "resources": [],
+        "fields": [],
+        "metrics": [],
+        "filters": [],
+        "relationships": [],
+        "queries": [],
+        "exports": [],
+        "actions": [],
+        "signature": "sig-abc"
+      },
+      "expectAccepted": true,
+      "expectCode": null
+    },
+    {
+      "name": "manifest.unsupported-major",
+      "kind": "manifest",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 2,
+          "minor": 0
+        },
+        "resources": [],
+        "fields": [],
+        "metrics": [],
+        "filters": [],
+        "relationships": [],
+        "queries": [],
+        "exports": [],
+        "actions": [],
+        "signature": "sig-abc"
+      },
+      "expectAccepted": false,
+      "expectCode": "UNSUPPORTED_CONTRACT_VERSION"
+    },
+    {
+      "name": "manifest.no-version",
+      "kind": "manifest",
+      "now": 1787000000,
+      "payload": {
+        "resources": [],
+        "signature": "s"
+      },
+      "expectAccepted": false,
+      "expectCode": "MALFORMED_MANIFEST"
+    },
+    {
+      "name": "manifest.version-not-numeric",
+      "kind": "manifest",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": "1",
+          "minor": 0
+        },
+        "resources": [],
+        "fields": [],
+        "metrics": [],
+        "filters": [],
+        "relationships": [],
+        "queries": [],
+        "exports": [],
+        "actions": [],
+        "signature": "sig-abc"
+      },
+      "expectAccepted": false,
+      "expectCode": "MALFORMED_MANIFEST"
+    },
+    {
+      "name": "manifest.missing-actions-key",
+      "kind": "manifest",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "resources": [],
+        "fields": [],
+        "metrics": [],
+        "filters": [],
+        "relationships": [],
+        "queries": [],
+        "exports": [],
+        "signature": "sig-abc"
+      },
+      "expectAccepted": false,
+      "expectCode": "MALFORMED_MANIFEST"
+    },
+    {
+      "name": "manifest.missing-relationships-key",
+      "kind": "manifest",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "resources": [],
+        "fields": [],
+        "metrics": [],
+        "filters": [],
+        "queries": [],
+        "exports": [],
+        "actions": [],
+        "signature": "sig-abc"
+      },
+      "expectAccepted": false,
+      "expectCode": "MALFORMED_MANIFEST"
+    },
+    {
+      "name": "manifest.unsigned-empty",
+      "kind": "manifest",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "resources": [],
+        "fields": [],
+        "metrics": [],
+        "filters": [],
+        "relationships": [],
+        "queries": [],
+        "exports": [],
+        "actions": [],
+        "signature": ""
+      },
+      "expectAccepted": false,
+      "expectCode": "UNSIGNED_MANIFEST"
+    },
+    {
+      "name": "manifest.unsigned-nonstring",
+      "kind": "manifest",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "resources": [],
+        "fields": [],
+        "metrics": [],
+        "filters": [],
+        "relationships": [],
+        "queries": [],
+        "exports": [],
+        "actions": [],
+        "signature": null
+      },
+      "expectAccepted": false,
+      "expectCode": "UNSIGNED_MANIFEST"
+    },
+    {
+      "name": "principal.valid",
+      "kind": "principal",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "aud": "structile-control-plane",
+        "exp": 1787000300
+      },
+      "expectAccepted": true,
+      "expectCode": null
+    },
+    {
+      "name": "principal.wrong-audience",
+      "kind": "principal",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "aud": "someone-else",
+        "exp": 1787000300
+      },
+      "expectAccepted": false,
+      "expectCode": "UNAUTHORIZED_CAPABILITY"
+    },
+    {
+      "name": "principal.expired",
+      "kind": "principal",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "aud": "structile-control-plane",
+        "exp": 1786999999
+      },
+      "expectAccepted": false,
+      "expectCode": "UNAUTHORIZED_CAPABILITY"
+    },
+    {
+      "name": "principal.exp-missing",
+      "kind": "principal",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 1,
+          "minor": 0
+        },
+        "aud": "structile-control-plane"
+      },
+      "expectAccepted": false,
+      "expectCode": "UNAUTHORIZED_CAPABILITY"
+    },
+    {
+      "name": "principal.unsupported-major",
+      "kind": "principal",
+      "now": 1787000000,
+      "payload": {
+        "contractVersion": {
+          "major": 7,
+          "minor": 0
+        },
+        "aud": "structile-control-plane",
+        "exp": 1787000300
+      },
+      "expectAccepted": false,
+      "expectCode": "UNSUPPORTED_CONTRACT_VERSION"
+    }
+  ]
+}
