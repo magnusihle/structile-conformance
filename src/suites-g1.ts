@@ -1,18 +1,19 @@
 /**
  * G1 protected suites, ported from the superseded `g1/protected-suites` branch onto the
  * hardened `g1-support.ts` shared module. Suites are appended here in re-cut order, one
- * per PR: DS-001 (design-system) landed first; SPEC-001 (spec-fuzz) lands here; later
- * suites (ACT-001, SPEC-002, CAP-001, PKG-001, HAR-004) are ported in their own PRs, not
+ * per PR: DS-001 (design-system), then SPEC-001 (spec-fuzz), then ACT-001 (action-contract)
+ * here; later suites (SPEC-002, CAP-001, PKG-001, HAR-004) are ported in their own PRs, not
  * batched into this file.
  */
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { listFiles, readJson, writeJson } from "./io.ts";
 import { runnerRoot } from "./catalog.ts";
 import type { SuiteContext, SuiteResult } from "./suites.ts";
 import {
   CONTRAST_MINIMUM, FORBIDDEN_STYLE_PATTERNS, INJECTION_PATTERNS, LIMIT_CEILINGS, POLLUTION_KEYS,
-  assertDiscriminates, assertPrototypeIntact, buildAndImport, collectPaths, contrastRatio,
+  assertDiscriminates, assertPrototypeIntact, assertRejects, buildAndImport, collectPaths, contrastRatio,
   createRandom, requireExports, resolveParent, type AnyRecord
 } from "./g1-support.ts";
 
@@ -501,5 +502,117 @@ export async function specFuzz({ candidate, artifactDir, options }: SuiteContext
       fuzzAccepted: accepted, fuzzRefused: refused, prototypePolluted: false
     },
     artifactNames: ["spec-fuzz.json", "rejected-corpus.json", "coverage.json"]
+  };
+}
+
+/* ------------------------------------------------------------------ ACT-001 */
+
+export async function actionContract({ candidate, artifactDir, options }: SuiteContext): Promise<SuiteResult> {
+  assert.ok(options["execution-disabled"] !== undefined, "ACT-001 requires --execution-disabled");
+  const sdk = await buildAndImport(candidate, "@structile/capability-sdk", "packages/capability-sdk");
+  requireExports(sdk, [
+    "validateActionDeclaration", "ACTION_EXECUTION_ENABLED", "assertExecutionDisabled",
+    "CapabilityErrorCode", "CapabilityContractError"
+  ], "@structile/capability-sdk");
+
+  // --- the execution gate is closed and cannot be opened by the candidate ---
+  assert.equal(sdk.ACTION_EXECUTION_ENABLED, false, "ACT-001: action execution must remain disabled at G1");
+  const gate = await assertRejects(() => sdk.assertExecutionDisabled(), "CapabilityContractError", "execution-gate");
+  assert.match(gate.error, /EXECUTION_DISABLED|execution is disabled/i);
+
+  // No execute/preview transport may exist in the shipped source.
+  const sdkFiles = (await listFiles(resolve(candidate, "packages/capability-sdk")))
+    .filter((path) => /^src\/.+\.ts$/.test(path));
+  const transportHits: Array<{ path: string; pattern: string }> = [];
+  for (const path of sdkFiles) {
+    const source = await readFile(resolve(candidate, "packages/capability-sdk", path), "utf8");
+    for (const pattern of [/\bfetch\s*\(/, /node:http/, /XMLHttpRequest/, /WebSocket/, /actions\/[^"'`]*\/execute/, /\bpg\b|postgres:\/\//i]) {
+      if (pattern.test(source)) transportHits.push({ path, pattern: String(pattern) });
+    }
+  }
+  assert.deepEqual(transportHits, [], "the G1 capability SDK must contain no execution transport");
+
+  // --- every ACT-001 field is enforced ---
+  // The protected declaration is the authority: a candidate cannot weaken the contract by
+  // shipping a convenient fixture. Its own example must validate too.
+  const declaration = await readJson(resolve(runnerRoot(), "fixtures/action/declaration.valid.json"));
+  sdk.validateActionDeclaration(declaration);
+  const candidateDeclaration = await readJson(resolve(candidate, "packages/capability-sdk/fixtures/action-declaration.valid.json"));
+  sdk.validateActionDeclaration(candidateDeclaration);
+  const requiredFields = [
+    "id", "version", "input", "output", "permissions", "scope", "risk", "preview",
+    "idempotency", "concurrency", "maxBatchSize", "mode", "timeoutMs", "retry", "audit", "redaction"
+  ];
+  const rejected: Array<{ label: string; rejected: true; error: string }> = [];
+  for (const field of requiredFields) {
+    const incomplete = { ...declaration };
+    delete (incomplete as AnyRecord)[field];
+    rejected.push(await assertDiscriminates(
+      () => sdk.validateActionDeclaration({ ...declaration }),
+      () => sdk.validateActionDeclaration(incomplete),
+      "CapabilityContractError", `missing:${field}`));
+  }
+  for (const mode of ["sync", "async"]) sdk.validateActionDeclaration({ ...declaration, mode });
+  rejected.push(await assertDiscriminates(
+    () => sdk.validateActionDeclaration({ ...declaration }),
+    () => sdk.validateActionDeclaration({ ...declaration, mode: "fire-and-forget" }),
+    "CapabilityContractError", "mode:unknown"));
+  // Pair risk with a coherent batch size: a bulk action that cannot batch is a
+  // contradiction, so asserting acceptance requires an otherwise-valid declaration.
+  for (const risk of ["normal", "destructive", "bulk", "high-impact"]) {
+    sdk.validateActionDeclaration({ ...declaration, risk, maxBatchSize: risk === "bulk" ? 10 : 1 });
+  }
+  // Risk and capability must agree: a batching action labelled low-risk would escape the
+  // reauthentication that bulk and high-impact carry.
+  rejected.push(await assertDiscriminates(
+    () => sdk.validateActionDeclaration({ ...declaration, risk: "bulk", maxBatchSize: 10 }),
+    () => sdk.validateActionDeclaration({ ...declaration, risk: "bulk", maxBatchSize: 1 }),
+    "CapabilityContractError", "risk:bulk-cannot-batch"));
+  rejected.push(await assertDiscriminates(
+    () => sdk.validateActionDeclaration({ ...declaration, risk: "high-impact", maxBatchSize: 50 }),
+    () => sdk.validateActionDeclaration({ ...declaration, risk: "normal", maxBatchSize: 50 }),
+    "CapabilityContractError", "risk:normal-cannot-batch"));
+  // architecture.md: "Normal updates require preview and confirmation."
+  rejected.push(await assertDiscriminates(
+    () => sdk.validateActionDeclaration({ ...declaration, preview: { required: true, effectSummary: "reviewed" } }),
+    () => sdk.validateActionDeclaration({ ...declaration, preview: { required: false, effectSummary: "reviewed" } }),
+    "CapabilityContractError", "preview:mandatory-for-every-risk"));
+  // A retry after a timeout must still fall inside the idempotency window.
+  rejected.push(await assertDiscriminates(
+    () => sdk.validateActionDeclaration({ ...declaration, timeoutMs: 15_000, idempotency: { keyRule: "client-supplied", windowSeconds: 15 } }),
+    () => sdk.validateActionDeclaration({ ...declaration, timeoutMs: 300_000, idempotency: { keyRule: "client-supplied", windowSeconds: 1 } }),
+    "CapabilityContractError", "idempotency:window-shorter-than-timeout"));
+  rejected.push(await assertDiscriminates(
+    () => sdk.validateActionDeclaration({ ...declaration }),
+    () => sdk.validateActionDeclaration({ ...declaration, risk: "trivial" }),
+    "CapabilityContractError", "risk:unknown"));
+
+  // --- forbidden scopes ---
+  for (const scope of [
+    { kind: "code", value: "eval" }, { kind: "sql", value: "SELECT 1" },
+    { kind: "network", value: "https://example.invalid" }, { kind: "infrastructure", value: "kubectl" }
+  ]) {
+    rejected.push(await assertDiscriminates(
+      () => sdk.validateActionDeclaration({ ...declaration }),
+      () => sdk.validateActionDeclaration({ ...declaration, scope: [scope] }),
+      "CapabilityContractError", `scope:${scope.kind}`));
+  }
+  assertPrototypeIntact();
+
+  await writeJson(resolve(artifactDir, "action-contract.json"), {
+    validatedDeclaration: declaration.id, requiredFields,
+    riskLevels: ["normal", "destructive", "bulk", "high-impact"], rejections: rejected
+  });
+  await writeJson(resolve(artifactDir, "execution-gate.json"), {
+    executionEnabled: false, assertThrows: true, gateError: gate.error,
+    transportHits, scannedSources: sdkFiles.length
+  });
+
+  return {
+    measurements: {
+      executionEnabled: false, requiredFields: requiredFields.length,
+      rejections: rejected.length, transportHits: 0
+    },
+    artifactNames: ["action-contract.json", "execution-gate.json"]
   };
 }
