@@ -1,0 +1,4 @@
+8550948fe663b75f2bfa4dcbcd98d44a8930144b9377d3c28cc84a11a2c0794f  tooling/task-ready
+883fa1476df45d38c58cf957e567687404d4e91d23cc409147dc38929d28388b  tooling/task-ready.mjs
+88a5a5eee8d8e12cb3497564c5094d0b0e57c69e824d44ffb3c32e43c835d2ab  tooling/validate-task-contract.mjs
+1bb373ee36b51c24f43f15f8d98bf36ba87137b2b74d2e6f39f64ea992dac5b2  tooling/check-pr-size.mjs
