@@ -1,0 +1,37 @@
+{
+  "specVersion": {
+    "major": 1,
+    "minor": 0
+  },
+  "id": "app.multi",
+  "title": "Multi",
+  "pages": [
+    {
+      "id": "home",
+      "path": "/",
+      "nodes": [
+        {
+          "componentId": "core.table",
+          "props": {
+            "title": "Home"
+          },
+          "slots": {}
+        }
+      ]
+    },
+    {
+      "id": "admin",
+      "path": "/admin",
+      "nodes": [
+        {
+          "componentId": "core.kpi",
+          "props": {
+            "label": "Users",
+            "metric": "users"
+          },
+          "slots": {}
+        }
+      ]
+    }
+  ]
+}
