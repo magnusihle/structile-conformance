@@ -20,9 +20,9 @@ test("protected planning inputs match the approved bootstrap hashes", async () =
   }
 });
 
-test("runner exposes only the six CLI-backed G0/G1 suites", async () => {
-  assert.deepEqual(Object.keys(suiteIds), ["architecture-boundaries", "compose-smoke", "agent-adapters", "harness-policy", "open-source", "design-system"]);
-  const gates: Record<string, string> = { "design-system": "G1" };
+test("runner exposes only the seven CLI-backed G0/G1 suites", async () => {
+  assert.deepEqual(Object.keys(suiteIds), ["architecture-boundaries", "compose-smoke", "agent-adapters", "harness-policy", "open-source", "design-system", "spec-fuzz"]);
+  const gates: Record<string, string> = { "design-system": "G1", "spec-fuzz": "G1" };
   for (const [slug, id] of Object.entries(suiteIds)) {
     const suite = await resolveSuite(slug);
     assert.ok(suite);
@@ -31,12 +31,12 @@ test("runner exposes only the six CLI-backed G0/G1 suites", async () => {
     assert.equal(typeof suites[slug as SuiteSlug], "function");
   }
   const { stdout } = await runFile(process.execPath, [resolve(root, "src/cli.ts"), "list"]);
-  assert.equal(JSON.parse(stdout).length, 6);
+  assert.equal(JSON.parse(stdout).length, 7);
 });
 
 test("unknown or not-yet-implemented suites fail closed with exit 2", async () => {
   await assert.rejects(
-    runFile(process.execPath, [resolve(root, "src/cli.ts"), "run", "spec-fuzz"]),
+    runFile(process.execPath, [resolve(root, "src/cli.ts"), "run", "action-contract"]),
     (error: unknown) => {
       const failure = error as { code?: number; stderr?: string };
       return failure.code === 2 && /unknown or unimplemented suite/.test(failure.stderr ?? "");
