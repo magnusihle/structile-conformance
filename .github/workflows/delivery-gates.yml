@@ -9,6 +9,7 @@ permissions:
 jobs:
   gates:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       BASE_REF: ${{ github.base_ref }}
     steps:
