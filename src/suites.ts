@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { basename, resolve } from "node:path";
 import { command, listFiles, readJson, sha256, writeJson } from "./io.ts";
 import type { SuiteSlug } from "./catalog.ts";
-import { designSystem, specFuzz } from "./suites-g1.ts";
+import { actionContract, designSystem, specFuzz } from "./suites-g1.ts";
 
 type AnyRecord = Record<string, any>;
 export type SuiteOptions = Record<string, string | true | undefined>;
@@ -328,7 +328,8 @@ export const suites: Readonly<Record<SuiteSlug, Suite>> = Object.freeze({
   "harness-policy": harnessPolicy,
   "open-source": openSource,
   "design-system": designSystem,
-  "spec-fuzz": specFuzz
+  "spec-fuzz": specFuzz,
+  "action-contract": actionContract
 });
 
 export function configDigest(slug: string, options: SuiteOptions): string {

@@ -11,7 +11,8 @@ export const suiteIds = Object.freeze({
   "harness-policy": "HAR-003",
   "open-source": "OSS-001",
   "design-system": "DS-001",
-  "spec-fuzz": "SPEC-001"
+  "spec-fuzz": "SPEC-001",
+  "action-contract": "ACT-001"
 });
 
 export type SuiteSlug = keyof typeof suiteIds;

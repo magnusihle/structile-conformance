@@ -1,0 +1,64 @@
+{
+  "id": "protected.reference.action",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "input": {
+    "type": "object",
+    "properties": {
+      "recordId": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "recordId"
+    ]
+  },
+  "output": {
+    "type": "object",
+    "properties": {
+      "applied": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "applied"
+    ]
+  },
+  "permissions": [
+    "records.write"
+  ],
+  "scope": [
+    {
+      "kind": "resource",
+      "value": "records"
+    }
+  ],
+  "risk": "high-impact",
+  "preview": {
+    "required": true,
+    "effectSummary": "Applies one reviewed change"
+  },
+  "idempotency": {
+    "keyRule": "client-supplied",
+    "windowSeconds": 3600
+  },
+  "concurrency": {
+    "optimisticToken": "version"
+  },
+  "maxBatchSize": 1,
+  "mode": "async",
+  "timeoutMs": 30000,
+  "retry": {
+    "classification": "non-retryable"
+  },
+  "audit": {
+    "fields": [
+      "recordId"
+    ]
+  },
+  "redaction": {
+    "fields": []
+  }
+}
