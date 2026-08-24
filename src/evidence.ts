@@ -43,9 +43,18 @@ export async function candidateIdentity(candidate: string): Promise<CandidateIde
   };
 }
 
+export function isOracleInput(path: string): boolean {
+  return (
+    path.startsWith("src/") ||
+    path.startsWith("fixtures/") ||
+    path === "verification/test-catalog.json" ||
+    path === "verification/evidence.schema.json"
+  );
+}
+
 export async function runnerDigests(): Promise<{ imageDigest: string; testSourceDigest: string; localUnsigned: boolean }> {
   const root = runnerRoot();
-  const files = (await listFiles(root)).filter((path) => path.startsWith("src/") || path === "verification/test-catalog.json" || path === "verification/evidence.schema.json");
+  const files = (await listFiles(root)).filter(isOracleInput);
   const content: string[] = [];
   for (const path of files) content.push(`${path}\0${await readFile(resolve(root, path), "utf8")}\0`);
   const testSource = sha256(content.join(""));
