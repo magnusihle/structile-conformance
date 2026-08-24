@@ -33,10 +33,10 @@
       "title": "Package pinning, compatibility and provenance matrix",
       "gate": "G1",
       "kind": "automated",
-      "command": "platform-conformance run package-matrix --schema current,previous --frozen-lockfile",
+      "command": "platform-conformance run package-matrix --schema released --frozen-lockfile",
       "environment": "Isolated registry proxy; signed package fixtures",
       "timeoutSeconds": 900,
-      "oracle": "All products use exact compatible versions; current/N-1 schemas install and run; unsigned, floating or incompatible packages are rejected.",
+      "oracle": "All products use exact compatible versions; every released supported schema major installs and runs (current only before a second major exists; current and N-1 thereafter); unsigned, floating or incompatible packages are rejected.",
       "evidenceArtifacts": ["package-matrix.json", "provenance-report.json"],
       "independentRerun": true,
       "requirements": ["ARC-003","ARC-004","SPEC-002"]
@@ -124,10 +124,10 @@
       "title": "Specification N/N-1 migration and rollback",
       "gate": "G1",
       "kind": "automated",
-      "command": "platform-conformance run spec-migrations --matrix current,previous --roundtrip",
-      "environment": "Protected corpus for each supported schema version",
+      "command": "platform-conformance run spec-migrations --matrix released --roundtrip",
+      "environment": "Protected corpus for each released supported schema version",
       "timeoutSeconds": 900,
-      "oracle": "Migrations are deterministic/idempotent; supported specs preserve semantics; forward/rollback round-trip meets normalized equality and compatibility matrix is complete.",
+      "oracle": "With one released major: the compatibility matrix truthfully declares current 1, previous null and migration/rollback not-applicable; unknown, future, fractional or unavailable versions fail closed; no synthetic major or corpus is fabricated. With two or more released majors: migrations are deterministic/idempotent; supported specs preserve semantics; forward/rollback round-trip meets normalized equality and the compatibility matrix is complete.",
       "evidenceArtifacts": ["migration-matrix.json", "roundtrip-diffs.json"],
       "independentRerun": true,
       "requirements": ["SPEC-002","SPEC-003"]
@@ -560,6 +560,32 @@
       "evidenceArtifacts": ["license-report.json", "public-boundary.json", "notice-report.json", "secret-scan.json"],
       "independentRerun": true,
       "requirements": ["DS-002","SEC-008","OSS-001","OSS-002","OSS-003"]
+    },
+    {
+      "id": "DEL-001",
+      "title": "Delivery guardrail enforcement",
+      "gate": "G1",
+      "kind": "automated",
+      "command": "platform-conformance run delivery-guardrails --candidate .",
+      "environment": "Clean candidate checkout with task contracts and CI configuration; no network",
+      "timeoutSeconds": 600,
+      "oracle": "Oversized, out-of-scope, contract-modifying or contract-less implementation PRs are rejected by CI; task-ready exists, validates every contract field and fails closed on violations; mechanical PRs reproduce byte-for-byte; a green task-ready is never emitted as release evidence.",
+      "evidenceArtifacts": ["guardrail-report.json"],
+      "independentRerun": true,
+      "requirements": ["DEL-001","DEL-002","DEL-003"]
+    },
+    {
+      "id": "DEL-002",
+      "title": "Runner subset and unsigned-envelope authority rejection",
+      "gate": "G1",
+      "kind": "automated",
+      "command": "platform-conformance run self-check --subset named --unsigned",
+      "environment": "Pinned runner image; builder-equivalent credentials; no signing identity",
+      "timeoutSeconds": 600,
+      "oracle": "A named subset executes exactly the requested tests; every emitted envelope carries localUnsigned true; the evidence gate rejects localUnsigned envelopes as authority for any requirement or gate claim.",
+      "evidenceArtifacts": ["subset-run.json", "authority-rejection.json"],
+      "independentRerun": true,
+      "requirements": ["DEL-004"]
     }
   ]
 }
