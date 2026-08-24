@@ -1,0 +1,15 @@
+{
+  "planningRepo": "github.com/magnusihle/structile-planning",
+  "planningCommit": "cf85495a2f71e0967909444aa7eac0973e3935f8",
+  "operatingModel": {
+    "commit": "619b17f87eb636895cc9325754750eb23b066e18",
+    "sha256": "54fc78d2ac0895c60448f63dc33543bc4f3bca22815fc762516fb064d586f97c",
+    "approvalTag": "delivery-model/approved-v1"
+  },
+  "vendored": [
+    "tooling/task-ready",
+    "tooling/task-ready.mjs",
+    "tooling/validate-task-contract.mjs",
+    "tooling/check-pr-size.mjs"
+  ]
+}

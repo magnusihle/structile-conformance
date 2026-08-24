@@ -14,7 +14,10 @@ const repositoryRoot = resolve(import.meta.dirname, "..");
 const policyPath = resolve(repositoryRoot, "language-policy.json");
 const requiredForbiddenExtensions = [".cjs", ".js", ".jsx", ".mjs"];
 const requiredIgnoredDirectories = [".git", "artifacts", "coverage", "dist", "evidence", "node_modules"];
-const approvedProtectedExceptions = ["tooling/test/validate-planning.test.mjs", "tooling/validate-planning.mjs"];
+// tooling/check-pr-size.mjs, task-ready.mjs and validate-task-contract.mjs are
+// vendored from structile-planning and byte-for-byte verified in CI against
+// delivery/planning-pin.sha256; they are not authored in this repository.
+const approvedProtectedExceptions = ["tooling/check-pr-size.mjs", "tooling/task-ready.mjs", "tooling/test/validate-planning.test.mjs", "tooling/validate-planning.mjs", "tooling/validate-task-contract.mjs"];
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
