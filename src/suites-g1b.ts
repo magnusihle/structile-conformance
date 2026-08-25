@@ -1,12 +1,16 @@
 /**
  * G1 protected suites, re-cut wave 2. Ported from the superseded `g1/protected-suites`
  * branch onto the hardened `g1-support.ts` shared module, appended in re-cut order: HAR-004
- * (graphify-policy), SPEC-002 (spec-migrations), then PKG-001 (package-matrix).
+ * (graphify-policy), SPEC-002 (spec-migrations), PKG-001 (package-matrix), then DEL-001
+ * (delivery-guardrails, a fresh suite with no salvage source).
  */
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { command, readJson, writeJson } from "./io.ts";
+import { pathToFileURL } from "node:url";
+import { command, readJson, sha256, writeJson } from "./io.ts";
 import { runnerRoot } from "./catalog.ts";
 import type { SuiteContext, SuiteResult } from "./suites.ts";
 import { assertDiscriminates, assertRejects, buildAndImport, requireExports, type AnyRecord } from "./g1-support.ts";
@@ -368,5 +372,238 @@ export async function packageMatrix({ candidate, artifactDir, options }: SuiteCo
       lockfileRewritten: false, supportedSchemaMajors: supported.length, branch
     },
     artifactNames: ["package-matrix.json", "provenance-report.json"]
+  };
+}
+
+/* ----------------------------------------------------------------- DEL-001 */
+
+/**
+ * Delivery guardrail enforcement (fresh suite, no salvage source). Verifies DEL-001/002/003 by
+ * exercising the candidate's vendored `tooling/task-ready`, `tooling/check-pr-size.mjs` and
+ * (oracle-first, same posture as HAR-004) `tooling/verify-mechanical.mjs` against synthetic
+ * scenarios in throwaway sandboxes -- never against the candidate's own repository state. The
+ * mechanical-reproduction clause is probed behaviorally, via a generic `{ generator, outputs }`
+ * contract never pinned to one implementation's bytes; the candidate does not yet vendor it, a
+ * genuine gap, not a suite defect. See docs/qualification/DEL-001.md.
+ */
+
+/** Pinned from planning authority (structile-planning@f2fc9327bd22f382d4d269ac45b5b1d9ccbb78ed,
+ * the lineage architecture/planning-inputs.lock.json already trusts); candidate-independent. */
+const CANONICAL_DELIVERY_TOOLING_SHA256: Readonly<Record<string, string>> = Object.freeze({
+  "tooling/task-ready": "8550948fe663b75f2bfa4dcbcd98d44a8930144b9377d3c28cc84a11a2c0794f",
+  "tooling/task-ready.mjs": "883fa1476df45d38c58cf957e567687404d4e91d23cc409147dc38929d28388b",
+  "tooling/validate-task-contract.mjs": "88a5a5eee8d8e12cb3497564c5094d0b0e57c69e824d44ffb3c32e43c835d2ab",
+  "tooling/check-pr-size.mjs": "1bb373ee36b51c24f43f15f8d98bf36ba87137b2b74d2e6f39f64ea992dac5b2"
+});
+
+async function sandboxGit(dir: string, ...args: string[]): Promise<string> {
+  return (await command("git", args, { cwd: dir })).stdout;
+}
+
+async function sandboxCommit(dir: string, message: string): Promise<void> {
+  await sandboxGit(dir, "add", "-A");
+  await sandboxGit(dir, "commit", "-q", "-m", message);
+}
+
+async function initSandbox(root: string, name: string): Promise<string> {
+  const dir = resolve(root, name);
+  await mkdir(resolve(dir, "delivery/tasks"), { recursive: true });
+  await mkdir(resolve(dir, "scratch"), { recursive: true });
+  await writeFile(resolve(dir, "README.md"), "sandbox\n");
+  await sandboxGit(dir, "init", "-q");
+  await sandboxGit(dir, "config", "user.email", "conformance@example.com");
+  await sandboxGit(dir, "config", "user.name", "conformance");
+  await sandboxCommit(dir, "init");
+  return dir;
+}
+
+/** Writes and commits a task contract (sensible defaults, overridable) as its own commit. */
+async function addContract(dir: string, overrides: AnyRecord = {}): Promise<void> {
+  const baseCommit = (await sandboxGit(dir, "rev-parse", "HEAD")).trim();
+  await writeJson(resolve(dir, "delivery/tasks/DEL-001-T01.json"), {
+    id: "DEL-001-T01",
+    behavior: "Adds a synthetic probe fixture for the DEL-001 delivery-guardrails suite.",
+    gate: "G1", requirements: ["DEL-001"], protectedTests: ["DEL-001"], baseCommit,
+    runnerDigest: `sha256:${"a".repeat(64)}`, testSourceDigest: `sha256:${"b".repeat(64)}`,
+    allowedPaths: ["scratch/**"], commands: ["true"], owner: "conformance-probe",
+    escalation: "spec-checkpoint", localArtifacts: ["scratch/report.json"],
+    budget: { maxLines: 50, maxFiles: 5 }, ...overrides
+  });
+  await sandboxCommit(dir, "add task contract");
+}
+
+/** Run a tool expected to sometimes exit non-zero; captures the outcome instead of throwing. */
+async function tryRun(program: string, args: readonly string[], options: AnyRecord = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+  try {
+    const { stdout, stderr } = await command(program, args, options);
+    return { code: 0, stdout, stderr };
+  } catch (error) {
+    const failure = error as { code?: number; stdout?: string; stderr?: string };
+    return { code: typeof failure.code === "number" ? failure.code : 1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+  }
+}
+
+export async function deliveryGuardrails({ candidate, artifactDir }: SuiteContext): Promise<SuiteResult> {
+  const taskReadyEntry = resolve(candidate, "tooling/task-ready");
+  const checkPrSizePath = resolve(candidate, "tooling/check-pr-size.mjs");
+  const mechanicalPath = resolve(candidate, "tooling/verify-mechanical.mjs");
+
+  // DEL-003: the entry point must exist at the pinned path and be directly executable.
+  const entryStat = await stat(taskReadyEntry);
+  assert.ok((entryStat.mode & 0o111) !== 0, "tooling/task-ready must be executable (DEL-003)");
+
+  // Vendored tooling must byte-match the planning-pinned canonical source. Collected now but
+  // asserted only at the very end: three of the four pinned files are also exactly what the
+  // behavioral probes below exercise, so asserting here would fail-fast on hash mismatch alone,
+  // masking whether a logic regression is *independently* caught by its own behavioral probe --
+  // exactly the distinction mutation testing needs to see.
+  const vendorMismatches: AnyRecord[] = [];
+  for (const [path, expected] of Object.entries(CANONICAL_DELIVERY_TOOLING_SHA256)) {
+    const actual = sha256(await readFile(resolve(candidate, path)));
+    if (actual !== expected) vendorMismatches.push({ path, expected, actual });
+  }
+
+  const root = await mkdtemp(resolve(tmpdir(), "structile-del001-"));
+
+  // task-ready: control plus one isolated violation per scenario, so each failure attributes to
+  // exactly one cause. Run as the real ./tooling/task-ready entry point (DEL-003), not a helper.
+  const taskReadyOutcomes: AnyRecord[] = [];
+  const probeTaskReady = async (dir: string, label: string, taskId: string, expectPass: boolean, pattern?: RegExp): Promise<{ stdout: string }> => {
+    const result = await tryRun(taskReadyEntry, [taskId, "--repo", dir]);
+    if (expectPass) assert.equal(result.code, 0, `${label}: expected task-ready to pass, got exit ${result.code}\n${result.stderr}`);
+    else {
+      assert.notEqual(result.code, 0, `${label}: must fail closed`);
+      if (pattern) assert.match(result.stderr, pattern, `${label}: unexpected failure reason`);
+    }
+    taskReadyOutcomes.push({ label, code: result.code, passed: result.code === 0 });
+    return result;
+  };
+
+  const controlDir = await initSandbox(root, "control");
+  await addContract(controlDir);
+  await writeJson(resolve(controlDir, "scratch/report.json"), { ok: true });
+  await sandboxCommit(controlDir, "in-scope change");
+  const control = await probeTaskReady(controlDir, "control: valid contract, in-scope change", "DEL-001-T01", true);
+  assert.match(control.stdout, /ready\./);
+  // A green task-ready run is never release evidence: plain, non-machine-readable text only.
+  assert.match(control.stdout, /Advisory only — not evidence; only the protected verifier produces evidence\./,
+    "a green task-ready run must say plainly it is not evidence (DEL-003)");
+  assert.throws(() => JSON.parse(control.stdout), "a green task-ready run must not be machine-parseable as an evidence envelope");
+
+  await probeTaskReady(controlDir, "nonexistent task id", "NOPE-999-T99", false, /cannot read delivery\/tasks\/NOPE-999-T99\.json/);
+
+  const schemaCases: ReadonlyArray<readonly [string, AnyRecord, RegExp]> = [
+    ["missing budget", { budget: undefined }, /budget must be an object/],
+    ["invalid baseCommit format", { baseCommit: "not-a-sha" }, /baseCommit must be a 40-hex commit SHA/],
+    ["missing owner", { owner: "" }, /owner must name the approving human/]
+  ];
+  for (const [label, override, pattern] of schemaCases) {
+    const dir = await initSandbox(root, `schema-${label.replace(/\s+/g, "-")}`);
+    await addContract(dir, override);
+    await probeTaskReady(dir, `schema violation: ${label}`, "DEL-001-T01", false, pattern);
+  }
+
+  const oosDir = await initSandbox(root, "out-of-scope");
+  await addContract(oosDir);
+  await writeJson(resolve(oosDir, "scratch/report.json"), { ok: true });
+  await writeFile(resolve(oosDir, "outside.txt"), "not allowed\n");
+  await sandboxCommit(oosDir, "touch a path outside allowedPaths");
+  await probeTaskReady(oosDir, "diff touches a path outside allowedPaths", "DEL-001-T01", false, /out of scope: outside\.txt/);
+
+  const bigDir = await initSandbox(root, "oversized");
+  await addContract(bigDir, { budget: { maxLines: 5, maxFiles: 5 } });
+  await writeFile(resolve(bigDir, "scratch/big.txt"), `${Array.from({ length: 50 }, (_, index) => index).join("\n")}\n`);
+  await writeJson(resolve(bigDir, "scratch/report.json"), { ok: true });
+  await sandboxCommit(bigDir, "exceed the declared line budget");
+  await probeTaskReady(bigDir, "diff exceeds the declared line budget", "DEL-001-T01", false, /gross churn \d+ lines exceeds budget 5/);
+
+  const modDir = await initSandbox(root, "contract-modified");
+  await addContract(modDir);
+  await writeJson(resolve(modDir, "scratch/report.json"), { ok: true });
+  await sandboxCommit(modDir, "in-scope change");
+  const contractPath = resolve(modDir, "delivery/tasks/DEL-001-T01.json");
+  const widened = JSON.parse(await readFile(contractPath, "utf8")) as AnyRecord;
+  widened.behavior = `${String(widened.behavior)} Modified after baseCommit.`;
+  await writeFile(contractPath, JSON.stringify(widened));
+  await sandboxCommit(modDir, "modify the task contract after baseCommit");
+  await probeTaskReady(modDir, "task contract modified after baseCommit", "DEL-001-T01", false,
+    /task contract must be introduced by exactly one approved commit after baseCommit and never modified/);
+
+  // check-pr-size: the hard ceilings (DEL-002), independent of task-ready's per-contract budgets.
+  const sizeOutcomes: AnyRecord[] = [];
+  const sizeCases: ReadonlyArray<readonly [string, boolean, (dir: string) => Promise<void>]> = [
+    ["within budget", true, async (dir) => writeFile(resolve(dir, "scratch/small.txt"), "a change\n")],
+    ["exceeds the 500-line ceiling", false, async (dir) =>
+      writeFile(resolve(dir, "scratch/big.txt"), `${Array.from({ length: 600 }, (_, index) => index).join("\n")}\n`)],
+    ["exceeds the 10-file ceiling", false, async (dir) => {
+      for (let index = 0; index < 11; index += 1) await writeFile(resolve(dir, `scratch/file-${index}.txt`), "x\n");
+    }]
+  ];
+  for (const [label, expectPass, setup] of sizeCases) {
+    const dir = await initSandbox(root, `check-pr-size-${label.replace(/\s+/g, "-")}`);
+    const base = (await sandboxGit(dir, "rev-parse", "HEAD")).trim();
+    await setup(dir);
+    await sandboxCommit(dir, label);
+    const result = await tryRun(process.execPath, [checkPrSizePath, base], { cwd: dir });
+    if (expectPass) assert.equal(result.code, 0, `${label}: expected check-pr-size to pass\n${result.stderr}`);
+    else {
+      assert.notEqual(result.code, 0, `${label}: expected check-pr-size to fail closed`);
+      assert.match(result.stderr, /DEL-002/);
+    }
+    sizeOutcomes.push({ label, code: result.code, passed: result.code === 0 });
+  }
+
+  // Mechanical-PR byte-for-byte reproduction (DEL-002), oracle-first: capability presence, then
+  // fail-closed/pass-on-reproduce behavior via a generic { generator, outputs } contract.
+  const mechanicalPresent = existsSync(mechanicalPath);
+  assert.ok(mechanicalPresent,
+    "tooling/verify-mechanical.mjs must exist and verify mechanical-PR byte-for-byte reproduction (DEL-002); " +
+    "this capability is not yet vendored by this candidate (see docs/qualification/DEL-001.md follow-ups)");
+  const mechanical = await import(`${pathToFileURL(mechanicalPath).href}?conformance=${Date.now()}`) as AnyRecord;
+  requireExports(mechanical, ["verifyMechanicalReproduction"], "tooling/verify-mechanical.mjs");
+
+  const generatorSource = "import{readFileSync,writeFileSync,mkdirSync}from\"node:fs\";mkdirSync(\"output\",{recursive:true});" +
+    "writeFileSync(\"output/generated.txt\",readFileSync(\"source.txt\",\"utf8\").toUpperCase());";
+  const mechanicalCases: ReadonlyArray<readonly [string, string | undefined, string, boolean, string | undefined]> = [
+    ["reproduces exactly", "HELLO WORLD", "node generate.mjs", true, undefined],
+    ["drifted output", "HAND EDITED", "node generate.mjs", false, "regenerated output differs"],
+    ["missing declared output", undefined, "node generate.mjs", false, "missing declared output"],
+    ["generator fails", "HELLO WORLD", "node does-not-exist.mjs", false, "generator failed"]
+  ];
+  const mechanicalOutcomes: AnyRecord[] = [];
+  for (const [label, content, generator, expectReproduced, messageFragment] of mechanicalCases) {
+    const dir = resolve(root, `mechanical-${label.replace(/\s+/g, "-")}`);
+    await mkdir(resolve(dir, "output"), { recursive: true });
+    await writeFile(resolve(dir, "source.txt"), "hello world");
+    await writeFile(resolve(dir, "generate.mjs"), generatorSource);
+    if (content !== undefined) await writeFile(resolve(dir, "output/generated.txt"), content);
+    const outcome = mechanical.verifyMechanicalReproduction({ generator, outputs: ["output/generated.txt"] }, dir) as AnyRecord;
+    assert.equal(outcome.reproduced, expectReproduced, `${label}: reproduced must be ${expectReproduced}`);
+    if (messageFragment) assert.ok(String(outcome.mismatches?.[0] ?? "").includes(messageFragment), `${label}: unexpected mismatch reason`);
+    mechanicalOutcomes.push({ label, reproduced: outcome.reproduced, mismatches: outcome.mismatches });
+  }
+
+  // Asserted last, deliberately: see the comment where vendorMismatches is collected above.
+  assert.deepEqual(vendorMismatches, [], "vendored delivery tooling must byte-match the planning-pinned canonical source");
+
+  await writeJson(resolve(artifactDir, "guardrail-report.json"), {
+    entryPoint: { path: "tooling/task-ready", executable: true },
+    vendoredToolingIntegrity: { pinned: CANONICAL_DELIVERY_TOOLING_SHA256, mismatches: vendorMismatches },
+    taskReadyProbes: taskReadyOutcomes,
+    checkPrSizeProbes: sizeOutcomes,
+    neverEvidence: { controlStdout: control.stdout.trim(), machineParseable: false },
+    mechanicalReproduction: { capabilityPresent: mechanicalPresent, probes: mechanicalOutcomes }
+  });
+
+  return {
+    measurements: {
+      taskReadyProbes: taskReadyOutcomes.length,
+      taskReadyFailClosed: taskReadyOutcomes.filter((outcome) => !outcome.passed).length,
+      checkPrSizeProbes: sizeOutcomes.length,
+      vendoredToolingMismatches: vendorMismatches.length,
+      mechanicalReproductionCapabilityPresent: mechanicalPresent,
+      mechanicalReproductionProbes: mechanicalOutcomes.length
+    },
+    artifactNames: ["guardrail-report.json"]
   };
 }
