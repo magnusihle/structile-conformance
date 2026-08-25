@@ -70,7 +70,7 @@
     {
       "id": "A11Y-001",
       "title": "WCAG 2.2 AA, keyboard and focus conformance",
-      "gate": "G1",
+      "gate": "G4",
       "kind": "automated",
       "command": "platform-conformance run accessibility --fixture northstar --browser chromium-pinned",
       "environment": "Pinned browser/fonts; desktop viewports; axe plus protected keyboard journeys",
@@ -166,10 +166,23 @@
       "command": "platform-conformance run authorization-matrix --tenants 20 --users 100 --property-cases 50000",
       "environment": "Real control and tenant PostgreSQL databases; synthetic principals/capabilities",
       "timeoutSeconds": 3600,
-      "oracle": "All allowed outcomes match policy and unauthorized read/write/publish/query/manifest expansion attempts equal zero; backend and control-plane decisions agree.",
+      "oracle": "All allowed outcomes match policy and unauthorized read/write/publish/query/manifest expansion attempts equal zero; backend and control-plane decisions agree; the run includes a re-execution of the AUTHZ-001 interface-level property matrix against the real full stack, with identical results.",
       "evidenceArtifacts": ["authorization-matrix.json", "denial-log.json", "database-access-log.json"],
       "independentRerun": true,
-      "requirements": ["SPEC-006","AUTH-005","AUTH-006","AUTH-007","CAP-002","CAP-003","QRY-003","FIX-003"]
+      "requirements": ["AUTH-005","AUTH-006","AUTH-007"]
+    },
+    {
+      "id": "AUTHZ-001",
+      "title": "Interface-level authorization property matrix (fixture principals)",
+      "gate": "G3",
+      "kind": "automated",
+      "command": "platform-conformance run authorization-matrix --interface-only --fixture-principals --tenants 20 --users 100 --property-cases 50000",
+      "environment": "Reference spec store; fixture principals/tenants; synthetic capabilities; no external identity provider",
+      "timeoutSeconds": 2700,
+      "oracle": "All allowed outcomes match policy and unauthorized read/write/publish/query/manifest expansion attempts equal zero at the control-plane/capability interface, over the fixture principal and tenant set.",
+      "evidenceArtifacts": ["authorization-matrix.json", "denial-log.json"],
+      "independentRerun": true,
+      "requirements": ["SPEC-006","QRY-003","CAP-002","CAP-003","FIX-003"]
     },
     {
       "id": "AUTH-003",
@@ -455,7 +468,7 @@
       "oracle": "G4 prerequisite is valid; every candidate is draft-only and validated; unauthorized/executable/raw-SQL/network/tool publication equals zero; request capture contains no live records; explicit publish policy holds.",
       "evidenceArtifacts": ["ai-safety.json", "candidate-validation.json", "request-data-classification.json"],
       "independentRerun": true,
-      "requirements": ["CAP-005","AI-001","AI-004","AI-005","AI-006","AI-007","AI-008"]
+      "requirements": ["CAP-005","AI-001","AI-004","AI-005","AI-006","AI-007","AI-008","ADOPT-004"]
     },
     {
       "id": "AI-002",
@@ -497,17 +510,56 @@
       "requirements": ["AI-003","HAR-001","HAR-002"]
     },
     {
-      "id": "HAR-002",
-      "title": "LangGraph crash, interrupt, fan-out and idempotency suite",
+      "id": "HARD-001",
+      "title": "Checkpoint and resume drill",
       "gate": "G1",
       "kind": "automated-drill",
-      "command": "platform-conformance run harness-durability --kill-every-node --pause 24h-simulated --parallel 2",
-      "environment": "PostgreSQL checkpointer/queue; Redis; fake GitHub side effects; frozen/advanced clock",
+      "command": "platform-conformance run harness-durability --scenario checkpoint-resume --kill-every-node --pause 24h-simulated",
+      "environment": "PostgreSQL checkpointer; frozen/advanced clock",
       "timeoutSeconds": 7200,
-      "oracle": "Every failure resumes from a valid checkpoint; approval persists; fan-in is complete/conflict-aware; Redis loss is harmless; exactly one branch/PR side effect exists for each stable operation ID.",
-      "evidenceArtifacts": ["trajectory.json", "checkpoint-audit.json", "side-effect-ledger.json", "queue-state.json"],
+      "oracle": "Every failure resumes from a valid checkpoint; human approval interrupts persist across a 24h-simulated pause without duplicate side effects.",
+      "evidenceArtifacts": ["trajectory.json", "checkpoint-audit.json"],
       "independentRerun": true,
-      "requirements": ["HAR-003","HAR-004","HAR-005","HAR-006","HAR-010"]
+      "requirements": ["HAR-003","HAR-004"]
+    },
+    {
+      "id": "HARD-002",
+      "title": "Fan-out and fan-in drill",
+      "gate": "G1",
+      "kind": "automated-drill",
+      "command": "platform-conformance run harness-durability --scenario fan-out-fan-in --kill-every-node --parallel 2",
+      "environment": "PostgreSQL checkpointer/queue",
+      "timeoutSeconds": 3600,
+      "oracle": "Fan-in from bounded parallel builder/verifier nodes is complete and conflict-aware, and detects conflicting edits or missing results.",
+      "evidenceArtifacts": ["trajectory.json"],
+      "independentRerun": true,
+      "requirements": ["HAR-005"]
+    },
+    {
+      "id": "HARD-003",
+      "title": "Queue recovery drill",
+      "gate": "G1",
+      "kind": "automated-drill",
+      "command": "platform-conformance run harness-durability --scenario queue-recovery --kill-every-node",
+      "environment": "PostgreSQL queue; Redis",
+      "timeoutSeconds": 3600,
+      "oracle": "Redis loss is harmless; scheduled task and approval state recovers from PostgreSQL without duplication or loss of pending work.",
+      "evidenceArtifacts": ["trajectory.json", "queue-state.json"],
+      "independentRerun": true,
+      "requirements": ["HAR-006"]
+    },
+    {
+      "id": "HARD-004",
+      "title": "Idempotent external effects drill",
+      "gate": "G1",
+      "kind": "automated-drill",
+      "command": "platform-conformance run harness-durability --scenario idempotent-effects --kill-every-node",
+      "environment": "PostgreSQL checkpointer/queue; fake GitHub side effects",
+      "timeoutSeconds": 3600,
+      "oracle": "Exactly one branch/PR side effect exists for each stable operation ID after kill-every-node retries and replay.",
+      "evidenceArtifacts": ["trajectory.json", "side-effect-ledger.json"],
+      "independentRerun": true,
+      "requirements": ["HAR-010"]
     },
     {
       "id": "HAR-003",
@@ -541,12 +593,51 @@
       "gate": "G4",
       "kind": "automated",
       "command": "platform-conformance run reference-fixture --fixture northstar --no-route-components",
-      "environment": "Clean product repo, mock capability backend, real control/tenant databases, pinned browser",
+      "environment": "Clean product repo, mock capability backend, reference spec store, fixture principals, pinned browser",
       "timeoutSeconds": 3600,
-      "oracle": "All required routes/structures/states/locales/themes/workflows/role outcomes pass through runtime; source scan finds no route-specific React page or copied reference dependency.",
+      "oracle": "All required routes/structures/states/locales/themes/workflows/role outcomes pass through runtime; source scan finds no route-specific React page or copied reference dependency. The full-stack variant of this suite re-runs against real control/tenant databases at Track B (G4A).",
       "evidenceArtifacts": ["fixture-structure.json", "browser-journeys.json", "runtime-source-scan.json"],
       "independentRerun": true,
       "requirements": ["ARC-005","DS-006","SPEC-010","FIX-001","FIX-002","FIX-003","FIX-004"]
+    },
+    {
+      "id": "ONBD-001",
+      "title": "Schema importer and contract linter conformance",
+      "gate": "G4",
+      "kind": "automated",
+      "command": "platform-conformance run adoption-onboarding --fixtures graphql,openapi --schema-importer --contract-linter",
+      "environment": "Reference GraphQL and OpenAPI fixture schemas; known-good and known-thin manifest fixtures; no live backend",
+      "timeoutSeconds": 900,
+      "oracle": "Importer output from the reference GraphQL and OpenAPI fixtures validates against the capability-manifest schema as unpublished drafts requiring human approval; `structile check` emits deterministic structural-completeness findings against known-good and known-thin fixture manifests and never asserts authorization correctness.",
+      "evidenceArtifacts": ["schema-import-report.json", "contract-lint-report.json"],
+      "independentRerun": true,
+      "requirements": ["ADOPT-001","ADOPT-002"]
+    },
+    {
+      "id": "ONBD-002",
+      "title": "Quickstart time-to-first-render and playground smoke",
+      "gate": "G4",
+      "kind": "automated",
+      "command": "platform-conformance run adoption-quickstart --profile pinned-hardware --playground-smoke --examples graphql,openapi",
+      "environment": "Versioned hardware/network profile; clean machine image; compose-up entrypoint",
+      "timeoutSeconds": 900,
+      "oracle": "Scripted clean-machine quickstart reaches first rendered dashboard output within 5 minutes wall-clock from compose-up on the fixed hardware profile; the hosted playground smoke journey completes without error; both published worked examples (one GraphQL, one OpenAPI capability fixture) build and render through the importer plus renderer path.",
+      "evidenceArtifacts": ["quickstart-timing.json", "playground-smoke.json", "examples-build-report.json"],
+      "independentRerun": true,
+      "requirements": ["ADOPT-003"]
+    },
+    {
+      "id": "ONBD-003",
+      "title": "Support tooling determinism suite",
+      "gate": "G4",
+      "kind": "automated",
+      "command": "platform-conformance run adoption-support-tooling --cases spec-diff,explain-view,admin-view-as",
+      "environment": "Reference spec store; fixture principals; deterministic canonical shared views",
+      "timeoutSeconds": 600,
+      "oracle": "Spec diff against the canonical shared view is deterministic and byte-stable across reruns; explain-this-view answers derive only from the specification and principal with no other input; admin view-as and reset round-trip without residual state.",
+      "evidenceArtifacts": ["spec-diff-report.json", "explain-view-report.json", "view-as-audit.json"],
+      "independentRerun": true,
+      "requirements": ["ADOPT-005"]
     },
     {
       "id": "OSS-001",
