@@ -8,6 +8,7 @@ import { command, listFiles, readJson, sha256, writeJson } from "./io.ts";
 import type { SuiteSlug } from "./catalog.ts";
 import { actionContract, capabilityContract, designSystem, specFuzz } from "./suites-g1.ts";
 import { deliveryGuardrails, graphifyPolicy, packageMatrix, specMigrations } from "./suites-g1b.ts";
+import { selfCheck } from "./suites-del.ts";
 
 type AnyRecord = Record<string, any>;
 export type SuiteOptions = Record<string, string | true | undefined>;
@@ -335,7 +336,8 @@ export const suites: Readonly<Record<SuiteSlug, Suite>> = Object.freeze({
   "graphify-policy": graphifyPolicy,
   "spec-migrations": specMigrations,
   "package-matrix": packageMatrix,
-  "delivery-guardrails": deliveryGuardrails
+  "delivery-guardrails": deliveryGuardrails,
+  "self-check": selfCheck
 });
 
 export function configDigest(slug: string, options: SuiteOptions): string {
