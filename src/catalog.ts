@@ -18,7 +18,8 @@ export const suiteIds = Object.freeze({
   "spec-migrations": "SPEC-002",
   "package-matrix": "PKG-001",
   "delivery-guardrails": "DEL-001",
-  "self-check": "DEL-002"
+  "self-check": "DEL-002",
+  "supply-chain": "SEC-005"
 });
 
 export type SuiteSlug = keyof typeof suiteIds;
