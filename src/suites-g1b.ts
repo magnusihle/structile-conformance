@@ -83,13 +83,27 @@ export async function graphifyPolicy({ candidate, artifactDir, options }: SuiteC
 
   // inferred: an unresolved edge cannot authorise anything; resolving it to source can.
   const resolved = { from: "packages/spec", to: "packages/catalog", kind: "RESOLVED", sourceRef: "packages/spec/src/validation.ts:1" };
-  const inferred = { from: "packages/spec", to: "packages/catalog", kind: "INFERRED" };
+  // The primary probe carries a source reference, so refusal can only be attributed to the kind.
+  // Probing with a bare {kind: "INFERRED"} instead masks the check: a candidate with no kind
+  // check at all still refuses that edge for its missing reference, and the probe proves nothing.
+  // Verifying an inferred edge against source means re-recording it as RESOLVED, not annotating
+  // the guess -- so an INFERRED edge is refused however well referenced it is.
+  const inferred = { ...resolved, kind: "INFERRED" };
   rejected.push(await assertDiscriminates(
     () => harness.assertEdgeUsable(resolved),
     () => harness.assertEdgeUsable(inferred),
+    "GraphifyPolicyError", "inferred:annotated-edge"));
+  rejected.push(await assertRejects(
+    () => harness.assertEdgeUsable({ from: "packages/spec", to: "packages/catalog", kind: "INFERRED" }),
     "GraphifyPolicyError", "inferred:unresolved-edge"));
   rejected.push(await assertRejects(
     () => harness.assertEdgeUsable({ ...inferred, sourceRef: "" }), "GraphifyPolicyError", "inferred:empty-source-ref"));
+  // The source-reference requirement needs its own probe on a RESOLVED edge: on an INFERRED one
+  // the kind check masks it, so only this pairing proves the reference is actually required.
+  rejected.push(await assertDiscriminates(
+    () => harness.assertEdgeUsable(resolved),
+    () => harness.assertEdgeUsable({ ...resolved, sourceRef: "" }),
+    "GraphifyPolicyError", "resolved:empty-source-ref"));
   // A malformed edge must be refused with the policy error, never a raw TypeError: a caller
   // must be able to tell a policy refusal from a crash.
   for (const [label, edge] of [["not-an-object", "packages/spec"], ["null", null], ["number", 42]] as Array<[string, unknown]>) {
